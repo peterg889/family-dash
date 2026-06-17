@@ -34,6 +34,17 @@ npm run start
 - **`app/page.tsx`** renders the dashboard with a live clock, per-train
   countdowns, and a refresh every 30 seconds.
 
+## Deploying to Vercel
+
+This is a standard Next.js app — Vercel auto-detects everything.
+
+1. Go to **[vercel.com/new](https://vercel.com/new)** and import the
+   `peterg889/family-dash` repo (authorize Vercel for GitHub if prompted).
+2. Leave all build settings at their defaults and click **Deploy**.
+3. Make sure the production branch is **`main`** (Project → Settings → Git).
+
+Every push to `main` then triggers an automatic redeploy.
+
 ## Refreshing the schedule
 
 NJ Transit updates the GTFS feed periodically. To pull the latest:
