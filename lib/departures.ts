@@ -12,10 +12,13 @@ type Trip = {
   headsign: string;
 };
 
+type StationCoord = { name: string; lat: number; lon: number };
+
 type Schedule = {
   generatedAt: string;
   origins: Record<string, string>;
   destinations: Record<string, string>;
+  coords: Record<string, StationCoord>;
   routes: Record<string, { name: string; short: string; color: string }>;
   trips: Trip[];
   calendar: Record<string, string[]>;
@@ -25,6 +28,7 @@ const schedule = scheduleData as Schedule;
 
 export type Departure = {
   depEpochMs: number;
+  arrEpochMs: number;
   depTime: string;
   arrTime: string;
   routeName: string;
@@ -92,6 +96,21 @@ function gtfsSeconds(t: string): number {
   return h * 3600 + m * 60 + s;
 }
 
+/** Minutes after midnight (0–1439) of an instant in New York. */
+function nyMinutesOf(epoch: number): number {
+  const p: Record<string, string> = {};
+  for (const part of new Intl.DateTimeFormat("en-US", {
+    timeZone: TZ,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date(epoch))) {
+    p[part.type] = part.value;
+  }
+  const h = p.hour === "24" ? 0 : Number(p.hour);
+  return h * 60 + Number(p.minute);
+}
+
 function fmtTime(epoch: number): string {
   return new Intl.DateTimeFormat("en-US", {
     timeZone: TZ,
@@ -104,22 +123,37 @@ function fmtTime(epoch: number): string {
 
 export type BoardKey = { origin: string; dest: string };
 
+export type DayFilter = "any" | "today" | "tomorrow";
+
 /**
  * Next upcoming departures from `origin` to `dest`, computed against `now`
  * (epoch ms). Looks across yesterday/today/tomorrow service dates so that
  * after-midnight trips and early-morning trips both resolve correctly.
+ *
+ * `dayFilter` limits results by New York calendar date:
+ *   - "today"    — only departures later today (empty once the day is done),
+ *   - "tomorrow" — only departures on the next calendar day (next morning),
+ *   - "any"      — the next upcoming departures regardless of day.
+ *
+ * `minNyMinutes`, when set, drops departures before that many minutes after
+ * New York midnight (e.g. 390 = 6:30 AM) when previewing the next morning.
  */
 export function nextDepartures(
   origin: string,
   dest: string,
   now: number = Date.now(),
-  limit = 4
+  limit = 4,
+  dayFilter: DayFilter = "any",
+  minNyMinutes?: number
 ): Departure[] {
   const trips = schedule.trips.filter(
     (t) => t.origin === origin && t.dest === dest
   );
 
   const { y, mo, d } = nyDateParts(now);
+  const todayKey = dateKey(y, mo, d);
+  const tomParts = nyDateParts(nyMidnightEpoch(y, mo, d + 1) + 12 * 3600_000);
+  const tomorrowKey = dateKey(tomParts.y, tomParts.mo, tomParts.d);
 
   const candidates: Departure[] = [];
   for (const offset of [-1, 0, 1]) {
@@ -134,10 +168,21 @@ export function nextDepartures(
       const depEpochMs = dayMidnight + gtfsSeconds(trip.dep) * 1000;
       if (depEpochMs < now) continue;
 
+      if (dayFilter !== "any") {
+        const dp = nyDateParts(depEpochMs);
+        const depKey = dateKey(dp.y, dp.mo, dp.d);
+        const wantKey = dayFilter === "today" ? todayKey : tomorrowKey;
+        if (depKey !== wantKey) continue;
+      }
+
+      if (minNyMinutes != null && nyMinutesOf(depEpochMs) < minNyMinutes)
+        continue;
+
       const arrEpochMs = dayMidnight + gtfsSeconds(trip.arr) * 1000;
       const route = schedule.routes[trip.route];
       candidates.push({
         depEpochMs,
+        arrEpochMs,
         depTime: fmtTime(depEpochMs),
         arrTime: fmtTime(arrEpochMs),
         routeName: route?.name ?? "",
@@ -161,5 +206,8 @@ export const STATION_NAMES = {
   ...schedule.origins,
   ...schedule.destinations,
 } as Record<string, string>;
+
+/** Lat/lon per stop_id, for computing drive time to the departure station. */
+export const STATION_COORDS = schedule.coords as Record<string, StationCoord>;
 
 export const SCHEDULE_GENERATED_AT = schedule.generatedAt;

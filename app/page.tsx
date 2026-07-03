@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 
 type Departure = {
   depEpochMs: number;
+  arrEpochMs: number;
   depTime: string;
   arrTime: string;
   routeName: string;
@@ -11,86 +12,152 @@ type Departure = {
   color: string;
   headsign: string;
   durationMin: number;
+  leaveByEpochMs: number | null;
 };
 
 type Board = {
   origin: string;
   dest: string;
-  note?: string;
+  destShort?: string;
+  driveMin: number | null;
   departures: Departure[];
+};
+
+type Commute = {
+  name: string;
+  driveMin: number | null;
+  etaEpochMs: number | null;
+  mapsUrl: string;
 };
 
 type ApiResponse = {
   now: number;
   generatedAt: string;
+  headline?: string;
+  showLeave?: boolean;
+  commute?: Commute;
   boards: Board[];
 };
 
 const REFRESH_MS = 30_000;
 
-function titleCase(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/\b\w/g, (c) => c.toUpperCase())
-    .replace(/\bNy\b/, "NY");
+// Compare departures against "today" in New York so a train rolling into
+// tomorrow gets a clear day tag instead of an unexplained 20-hour countdown.
+const NY_YMD = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "America/New_York",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+const NY_WD = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York",
+  weekday: "short",
+});
+const NY_CLOCK = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York",
+  hour: "numeric",
+  minute: "2-digit",
+});
+
+/** "10:42 PM" -> { hm: "10:42", ap: "p" } — meridiem squeezed to one letter. */
+function splitTime(t: string): { hm: string; ap: string } {
+  const m = t.match(/^(\d{1,2}:\d{2})\s*([AP]M)?$/i);
+  if (!m) return { hm: t, ap: "" };
+  return { hm: m[1], ap: (m[2]?.[0] ?? "").toLowerCase() };
 }
 
-function Countdown({ depEpochMs, now }: { depEpochMs: number; now: number }) {
-  const mins = Math.round((depEpochMs - now) / 60000);
-  let cls = "countdown";
-  let label: string;
-  if (mins <= 0) {
-    cls += " now";
-    label = "now";
-  } else if (mins < 5) {
-    cls += " soon";
-    label = `${mins} min`;
-  } else if (mins < 60) {
-    label = `${mins} min`;
-  } else {
-    const h = Math.floor(mins / 60);
-    const m = mins % 60;
-    label = m ? `${h}h ${m}m` : `${h}h`;
-  }
+function countdownLabel(mins: number): string {
+  if (mins <= 0) return "NOW";
+  if (mins < 60) return `${mins}`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m ? `${h}h${String(m).padStart(2, "0")}` : `${h}h`;
+}
+
+/** A clock time as "9:56" + small "a"/"p", with optional weekday prefix. */
+function Clock({ epoch, withDay, now }: { epoch: number; withDay?: boolean; now?: number }) {
+  const { hm, ap } = splitTime(NY_CLOCK.format(epoch));
+  const showDay =
+    withDay && now != null && NY_YMD.format(epoch) !== NY_YMD.format(now);
   return (
-    <div className={cls}>
-      <div className="big">{mins <= 0 ? "now" : label}</div>
-      {mins > 0 && <div className="unit">until departure</div>}
-    </div>
+    <>
+      {showDay && <span className="day">{NY_WD.format(epoch)}</span>}
+      {hm}
+      <span className="ap">{ap}</span>
+    </>
   );
 }
 
-function BoardCard({ board, now }: { board: Board; now: number }) {
+/**
+ * One route as a table row-group: a route header row, then a row per
+ * upcoming train with (leave) / depart / arrive going across — so the same
+ * columns line up across every route and you can scan down to compare. The
+ * "leave" column only appears for outbound trips (you drive from home).
+ */
+function BoardGroup({
+  board,
+  now,
+  showLeave,
+}: {
+  board: Board;
+  now: number;
+  showLeave: boolean;
+}) {
+  const trains = board.departures;
+  const lead = trains[0];
+  const rail = lead ? `#${lead.color}` : "var(--rule)";
+  const span = showLeave ? 4 : 3;
+
   return (
-    <div className="board">
-      <div className="board-head">
-        <span className="from">{titleCase(board.origin)}</span>
-        <span className="arrow">→</span>
-        <span className="to">{titleCase(board.dest)}</span>
-      </div>
-      {board.note && <div className="board-note">{board.note}</div>}
-      {board.departures.length === 0 ? (
-        <div className="empty">No more trains scheduled.</div>
+    <tbody className="group">
+      <tr className="route-row">
+        <td colSpan={span}>
+          <span className="rail" style={{ background: rail }} />
+          <span className="from">{board.origin}</span>
+          <span className="arr-i">→</span>
+          <span className="to">{board.destShort ?? board.dest}</span>
+          {board.driveMin != null && (
+            <span className="drive">{board.driveMin} min drive</span>
+          )}
+        </td>
+      </tr>
+
+      {trains.length === 0 ? (
+        <tr>
+          <td className="none" colSpan={span}>
+            no more direct trains
+          </td>
+        </tr>
       ) : (
-        board.departures.map((d) => (
-          <div className="train" key={d.depEpochMs + d.headsign}>
-            <div
-              className="line-badge"
-              style={{ background: `#${d.color}` }}
-              title={d.routeName}
-            />
-            <div className="deptime">{d.depTime}</div>
-            <div className="meta">
-              <div className="headsign">{titleCase(d.headsign)}</div>
-              <div className="sub">
-                {d.routeName} · arrives {d.arrTime} · {d.durationMin} min
-              </div>
-            </div>
-            <Countdown depEpochMs={d.depEpochMs} now={now} />
-          </div>
-        ))
+        trains.map((d) => {
+          const mins = Math.round((d.depEpochMs - now) / 60000);
+          const cdCls = mins <= 0 ? "now" : mins < 6 ? "soon" : "";
+          const late = d.leaveByEpochMs != null && d.leaveByEpochMs <= now;
+          const soon =
+            d.leaveByEpochMs != null &&
+            !late &&
+            d.leaveByEpochMs - now < 10 * 60_000;
+          return (
+            <tr className="train-row" key={d.depEpochMs + d.headsign}>
+              <td className={`cd ${cdCls}`}>
+                {mins <= 0 ? "NOW" : `in ${countdownLabel(mins)}${mins < 60 ? "m" : ""}`}
+              </td>
+              {showLeave && (
+                <td className={`v leave ${late ? "late" : soon ? "soon" : ""}`}>
+                  {d.leaveByEpochMs != null ? <Clock epoch={d.leaveByEpochMs} /> : "—"}
+                </td>
+              )}
+              <td className="v">
+                <Clock epoch={d.depEpochMs} withDay now={now} />
+              </td>
+              <td className="v">
+                <Clock epoch={d.arrEpochMs} />
+              </td>
+            </tr>
+          );
+        })
       )}
-    </div>
+    </tbody>
   );
 }
 
@@ -100,13 +167,11 @@ export default function Page() {
   const [fetchedAt, setFetchedAt] = useState(0);
   const [error, setError] = useState(false);
 
-  // Tick the local clock every second for live countdowns.
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
 
-  // Refetch the schedule periodically.
   useEffect(() => {
     let active = true;
     async function load() {
@@ -136,52 +201,71 @@ export default function Page() {
     hour: "numeric",
     minute: "2-digit",
   }).format(now);
-  const clockDate = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
-    weekday: "long",
-    month: "long",
-    day: "numeric",
-  }).format(now);
 
   const stale = fetchedAt > 0 && now - fetchedAt > REFRESH_MS * 2;
+  const live = !error && !stale;
 
   return (
-    <main className="dashboard">
-      <div className="topbar">
-        <div>
-          <h1>Next Trains</h1>
-          <div className="subtitle">
-            To New York &amp; Hoboken from Morristown &amp; Bernardsville
+    <main className="panel-wrap">
+      <section className="panel">
+        <div className="topbar">
+          <span className="kicker">
+            <span className={`pulse ${live ? "on" : "off"}`} />
+            NJ TRANSIT{data?.headline ? ` · ${data.headline}` : ""}
+          </span>
+          <span className="clock">{clockTime}</span>
+        </div>
+
+        {data ? (
+          <table className="board-table">
+            <thead>
+              <tr>
+                <th />
+                {data.showLeave !== false && <th>leave</th>}
+                <th>depart</th>
+                <th>arrive</th>
+              </tr>
+            </thead>
+            {data.boards.map((b) => (
+              <BoardGroup
+                key={b.origin + b.dest}
+                board={b}
+                now={now}
+                showLeave={data.showLeave !== false}
+              />
+            ))}
+          </table>
+        ) : (
+          <div className="loading">
+            {error ? "Couldn’t load schedule." : "Loading…"}
           </div>
-        </div>
-        <div className="clock">
-          <div className="time">{clockTime}</div>
-          <div className="date">{clockDate}</div>
-        </div>
-      </div>
+        )}
+      </section>
 
-      {data ? (
-        <div className="grid">
-          {data.boards.map((b) => (
-            <BoardCard key={b.origin + b.dest} board={b} now={now} />
-          ))}
-        </div>
-      ) : (
-        <div className="empty">
-          {error ? "Couldn’t load schedule." : "Loading…"}
-        </div>
+      {data?.commute?.driveMin != null && (
+        <a
+          className="panel commute"
+          href={data.commute.mapsUrl}
+          target="_blank"
+          rel="noreferrer"
+        >
+          <span className="cm-left">
+            <span className="cm-kicker">school run · drive</span>
+            <span className="cm-name">{data.commute.name}</span>
+          </span>
+          <span className="cm-right">
+            <span className="cm-time">
+              {data.commute.driveMin}
+              <span className="cm-unit">min</span>
+            </span>
+            {data.commute.etaEpochMs != null && (
+              <span className="cm-eta">
+                arrive <Clock epoch={data.commute.etaEpochMs} />
+              </span>
+            )}
+          </span>
+        </a>
       )}
-
-      <div className="footer">
-        <span className={`dot${stale || error ? " stale" : ""}`} />
-        {error
-          ? "Reconnecting…"
-          : stale
-            ? "Reconnecting…"
-            : "Live · updates every 30s"}{" "}
-        · Scheduled times from NJ Transit GTFS feed
-        {data ? ` (${data.generatedAt.slice(0, 10)})` : ""}
-      </div>
     </main>
   );
 }
