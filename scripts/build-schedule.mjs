@@ -107,6 +107,7 @@ function loadGtfs() {
   return {
     routes: read("routes.txt"),
     trips: read("trips.txt"),
+    stops: read("stops.txt"),
     stopTimes: read("stop_times.txt"),
     calendarDates: read("calendar_dates.txt"),
   };
@@ -116,7 +117,23 @@ function loadGtfs() {
 // Build the compact schedule.
 // ---------------------------------------------------------------------------
 function main() {
-  const { routes, trips, stopTimes, calendarDates } = loadGtfs();
+  const { routes, trips, stops, stopTimes, calendarDates } = loadGtfs();
+
+  // Lat/lon for the stations we care about — used to compute drive time from
+  // home to the departure station ("leave by").
+  const watchedStops = new Set([
+    ...Object.keys(ORIGINS),
+    ...Object.keys(DESTINATIONS),
+  ]);
+  const coords = {};
+  for (const s of stops) {
+    if (!watchedStops.has(s.stop_id)) continue;
+    coords[s.stop_id] = {
+      name: s.stop_name,
+      lat: Number(s.stop_lat),
+      lon: Number(s.stop_lon),
+    };
+  }
 
   const routeById = {};
   for (const r of routes) {
@@ -150,11 +167,15 @@ function main() {
 
   for (const [tripId, stops] of byTrip) {
     stops.sort((a, b) => a.seq - b.seq);
-    const origin = stops.find((s) => ORIGINS[s.stop]);
-    if (!origin) continue;
-    // first destination reached after the origin
-    const dest = stops.find((s) => DESTINATIONS[s.stop] && s.seq > origin.seq);
-    if (!dest) continue;
+    // A trip serves at most one suburb (Morristown/Bernardsville are on
+    // different branches) and one city (it terminates at NY Penn or Hoboken).
+    // Whichever comes first in the stop sequence is the origin — so we capture
+    // the trip in whichever direction it actually runs (outbound or inbound).
+    const suburb = stops.find((s) => ORIGINS[s.stop]);
+    const city = stops.find((s) => DESTINATIONS[s.stop]);
+    if (!suburb || !city) continue;
+    const [origin, dest] =
+      suburb.seq < city.seq ? [suburb, city] : [city, suburb];
 
     const trip = tripById[tripId];
     if (!trip) continue;
@@ -188,6 +209,7 @@ function main() {
     generatedAt: new Date().toISOString(),
     origins: ORIGINS,
     destinations: DESTINATIONS,
+    coords,
     routes: routesOut,
     trips: outTrips,
     calendar,

@@ -10,7 +10,7 @@
     "build:schedule": "node scripts/build-schedule.mjs"
   },
   "dependencies": {
-    "next": "15.3.4",
+    "next": "15.5.19",
     "react": "19.1.0",
     "react-dom": "19.1.0"
   },
