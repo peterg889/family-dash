@@ -1,1 +1,9 @@
 .vercel
+
+# ESP32 firmware
+firmware/.pio/
+firmware/src/wifi_config.h
+tools/node_modules/
+tools/preview/*.png
+__pycache__/
+*.pyc
