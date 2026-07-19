@@ -77,6 +77,12 @@ static void fmt_clock(time_t t, char* buf, size_t n, bool upperAmPm) {
 
 static const long CATCH_GRACE = 120;  // seconds — still catchable if just past
 
+// The instant the countdown tracks: leave-the-house time when the API sent
+// one, otherwise (evening boards, no drive leg) the departure itself.
+static time_t go_epoch(const DepView& d) {
+  return d.leaveEpoch ? d.leaveEpoch : d.depEpoch;
+}
+
 struct DepRef {
   const BoardView* b;
   const DepView* d;
@@ -95,7 +101,7 @@ static int collect_station(const BoardData& data, const char* station,
     const BoardView& b = data.boards[i];
     if (!belongs(b, station)) continue;
     for (int j = 0; j < b.nDeps; j++) {
-      if (b.deps[j].leaveEpoch < now - CATCH_GRACE) continue;
+      if (go_epoch(b.deps[j]) < now - CATCH_GRACE) continue;
       if (n < cap) out[n++] = {&b, &b.deps[j]};
     }
   }
@@ -117,27 +123,69 @@ static int station_drive(const BoardData& data, const char* station) {
   return 0;
 }
 
-// "leave in 22 min" / "leave in 1h03" / "leave now".
-static void fmt_leavein(long mins, char* buf, size_t n) {
+// "leave in 22 min" / "departs in 1h03" / "leave now" — "leave" when there's a
+// drive leg to time, "departs" when the countdown tracks the train itself.
+static void fmt_goin(long mins, bool leave, char* buf, size_t n) {
+  const char* verb = leave ? "leave" : "departs";
   if (mins <= 0)
-    snprintf(buf, n, "leave now");
+    snprintf(buf, n, "%s now", verb);
   else if (mins < 60)
-    snprintf(buf, n, "leave in %ld min", mins);
+    snprintf(buf, n, "%s in %ld min", verb, mins);
   else
-    snprintf(buf, n, "leave in %ldh%02ld", mins / 60, mins % 60);
+    snprintf(buf, n, "%s in %ldh%02ld", verb, mins / 60, mins % 60);
 }
 
-// "catch the 12:23p, arrive 1:41p" (adds "to <dest>" when a station serves
-// more than one destination).
-static void fmt_detail(const DepRef& r, bool oneDest, char* buf, size_t n) {
+// "catch the 12:23p, arrive 1:41p" — adds "to <dest>" when a station serves
+// more than one destination, or "from <origin>" when evening trains leave from
+// more than one city terminal.
+static void fmt_detail(const DepRef& r, bool oneDest, bool oneOrigin, char* buf,
+                       size_t n) {
   char dp[12], ar[12];
   fmt_clock(r.d->depEpoch, dp, sizeof(dp), false);
   fmt_clock(r.d->arrEpoch, ar, sizeof(ar), false);
-  if (oneDest)
-    snprintf(buf, n, "catch the %s, arrive %s", dp, ar);
-  else
+  if (!oneDest)
     snprintf(buf, n, "catch the %s to %s, arrive %s", dp,
              dest_label(r.b->destShort), ar);
+  else if (!oneOrigin)
+    snprintf(buf, n, "catch the %s from %s, arrive %s", dp,
+             dest_label(r.b->origin), ar);
+  else
+    snprintf(buf, n, "catch the %s, arrive %s", dp, ar);
+}
+
+// --- live status ------------------------------------------------------------
+
+// Exception text for a train that needs attention; empty when running normally.
+static void fmt_exception(const DepView& d, char* buf, size_t n) {
+  if (d.live == LIVE_CANCELLED)
+    snprintf(buf, n, "CANCELLED");
+  else if (d.live == LIVE_BOARDING)
+    snprintf(buf, n, "ALL ABOARD");
+  else if (d.live == LIVE_DELAYED)
+    snprintf(buf, n, "+%d late", (int)d.delayMin);
+  else
+    buf[0] = 0;
+}
+
+// Inverted pill (filled, white text), right-aligned so its right edge is at xr,
+// with the text baseline at y. The loud treatment is reserved for exceptions.
+static void draw_pill(GFXcanvas1& c, int xr, int y, const char* s) {
+  const GFXfont* f = &FreeSansBold9pt7b;
+  int w = text_w(c, f, s);
+  c.fillRoundRect(xr - w - 12, y - 14, w + 12, 19, 4, INK);
+  draw_left(c, f, xr - w - 6, y, BG, s);
+}
+
+// "Trk 3", right-aligned after the detail text on the same line — quiet, only
+// when a track is assigned and there's clear space after the detail text.
+static void draw_track(GFXcanvas1& c, const DepView& d, const char* detail,
+                       int y) {
+  if (!d.track[0] || d.live == LIVE_CANCELLED) return;
+  char buf[14];
+  snprintf(buf, sizeof(buf), "Trk %s", d.track);
+  const GFXfont* f = &FreeSans9pt7b;
+  int need = PAD_L + text_w(c, f, detail) + 16 + text_w(c, f, buf);
+  if (need <= UI_W - 10) draw_right(c, f, UI_W - 10, y, INK, buf);
 }
 
 // --- shared header ----------------------------------------------------------
@@ -185,32 +233,37 @@ static void draw_station_screen(GFXcanvas1& c, const BoardData& data,
     return;
   }
 
-  // Are all this station's trains headed to the same place?
-  bool oneDest = true;
-  for (int i = 1; i < n; i++)
-    if (strcmp(deps[i].b->destShort, deps[0].b->destShort) != 0) oneDest = false;
+  // Morning boards count down to leaving the house; evening boards (no drive
+  // leg) count down to the departure itself.
+  bool hasLeave = deps[0].d->leaveEpoch != 0;
 
-  // Sub-line: to <dest(s)> ............... N min drive
+  // Are all this station's trains headed to / coming from the same place?
+  bool oneDest = true, oneOrigin = true;
+  for (int i = 1; i < n; i++) {
+    if (strcmp(deps[i].b->destShort, deps[0].b->destShort) != 0) oneDest = false;
+    if (strcmp(deps[i].b->origin, deps[0].b->origin) != 0) oneOrigin = false;
+  }
+
+  // Sub-line: "to <dest(s)>" (morning) / "from <origin(s)>" (evening),
+  // with the drive time on the right when there is one.
   char sub[48];
-  if (oneDest) {
-    snprintf(sub, sizeof(sub), "to %s", dest_label(deps[0].b->destShort));
-  } else {
-    sub[0] = 0;
-    for (int i = 0; i < n; i++) {
-      const char* dl = dest_label(deps[i].b->destShort);
-      if (sub[0] && strstr(sub, dl)) continue;  // skip a dest already listed
-      size_t l = strlen(sub);
-      snprintf(sub + l, sizeof(sub) - l, "%s%s", l ? " & " : "to ", dl);
-    }
+  sub[0] = 0;
+  for (int i = 0; i < n; i++) {
+    const char* dl =
+        dest_label(hasLeave ? deps[i].b->destShort : deps[i].b->origin);
+    if (sub[0] && strstr(sub, dl)) continue;  // skip a place already listed
+    size_t l = strlen(sub);
+    snprintf(sub + l, sizeof(sub) - l, "%s%s", l ? " & " : (hasLeave ? "to " : "from "), dl);
   }
   draw_left(c, &FreeSans9pt7b, PAD_L, 64, INK, sub);
   if (driveTxt[0]) draw_right(c, &FreeSans9pt7b, UI_W - 10, 64, INK, driveTxt);
 
   // Hero: the next catchable train — LEAVE IN <big number> + detail.
   char line[80];
-  long leaveMin = (long)((deps[0].d->leaveEpoch - now) / 60);
+  long leaveMin = (long)((go_epoch(*deps[0].d) - now) / 60);
   draw_left(c, &FreeSans9pt7b, PAD_L, 90, INK,
-            leaveMin <= 0 ? "TIME TO GO" : "LEAVE IN");
+            hasLeave ? (leaveMin <= 0 ? "TIME TO GO" : "LEAVE IN")
+                     : (leaveMin <= 0 ? "DEPARTING" : "DEPARTS IN"));
   if (leaveMin <= 0) {
     draw_left(c, &FreeSansBold24pt7b, PAD_L, 132, INK, "now");
   } else if (leaveMin < 60) {
@@ -224,8 +277,15 @@ static void draw_station_screen(GFXcanvas1& c, const BoardData& data,
     snprintf(big, sizeof(big), "%ldh%02ld", leaveMin / 60, leaveMin % 60);
     draw_left(c, &FreeSansBold24pt7b, PAD_L, 132, INK, big);
   }
-  fmt_detail(deps[0], oneDest, line, sizeof(line));
+  // Live status: exception pill beside the big countdown; track on the detail
+  // line. The leave-in math stays scheduled-time — the pill is the alert.
+  char badge[16];
+  fmt_exception(*deps[0].d, badge, sizeof(badge));
+  if (badge[0]) draw_pill(c, UI_W - 10, 124, badge);
+
+  fmt_detail(deps[0], oneDest, oneOrigin, line, sizeof(line));
   draw_left(c, &FreeSans9pt7b, PAD_L, 158, INK, line);
+  draw_track(c, *deps[0].d, line, 158);
 
   // Up next — same "leave in / catch / arrive" phrasing, quieter.
   if (n > 1) {
@@ -236,12 +296,17 @@ static void draw_station_screen(GFXcanvas1& c, const BoardData& data,
     int y = 192;
     for (int i = 1; i < n && i <= 2; i++) {
       char lin[24];
-      fmt_leavein((long)((deps[i].d->leaveEpoch - now) / 60), lin, sizeof(lin));
+      fmt_goin((long)((go_epoch(*deps[i].d) - now) / 60), hasLeave, lin,
+               sizeof(lin));
       y += 24;
       draw_left(c, &FreeSansBold9pt7b, PAD_L, y, INK, lin);
+      char badge2[16];
+      fmt_exception(*deps[i].d, badge2, sizeof(badge2));
+      if (badge2[0]) draw_pill(c, UI_W - 10, y, badge2);
       y += 18;
-      fmt_detail(deps[i], oneDest, line, sizeof(line));
+      fmt_detail(deps[i], oneDest, oneOrigin, line, sizeof(line));
       draw_left(c, &FreeSans9pt7b, PAD_L, y, INK, line);
+      draw_track(c, *deps[i].d, line, y);
     }
   }
 }
