@@ -212,6 +212,34 @@ body::before {
   text-transform: uppercase;
 }
 
+/* live status badge (delay / track / cancellation) under the depart time */
+.train-row .v .live {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  font-size: clamp(8px, 1vw, 10px);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.train-row .v .live .lv.late,
+.train-row .v .live .lv.cancelled {
+  color: var(--late);
+}
+.train-row .v .live .lv.boarding {
+  color: var(--green);
+}
+.train-row .v .live .lv.ontime {
+  color: var(--dim);
+  opacity: 0.85;
+}
+.train-row .v .live .trk {
+  color: var(--amber-soft);
+}
+
 /* the "leave" column is the action: bright, amber when near, red when past */
 .train-row .v.leave {
   color: var(--ink);

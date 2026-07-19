@@ -1,5 +1,11 @@
 .vercel
 
+# Next.js / Node
+node_modules/
+.next/
+*.tsbuildinfo
+.env*.local
+
 # ESP32 firmware
 firmware/.pio/
 firmware/src/wifi_config.h

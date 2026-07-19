@@ -11,6 +11,11 @@ import {
   driveSecondsToAddress,
   HOME_ADDRESS,
 } from "@/lib/driving";
+import {
+  fetchLiveBoards,
+  matchLiveStatus,
+  type LiveTrain,
+} from "@/lib/njtransit";
 
 export const dynamic = "force-dynamic";
 
@@ -119,6 +124,17 @@ export async function GET(req: Request) {
   // Willow School drive (always shown) kicks off concurrently with station drives.
   const willowPromise = driveSecondsToAddress("willow", WILLOW.address, now);
 
+  // Live DepartureVision status (delay / track / cancellations) only exists for
+  // near-term trains, so only fetch it for today's boards — the next-morning
+  // preview has no real-time data yet. Kicks off concurrently with the drives.
+  const liveBoardsPromise: Promise<Map<string, LiveTrain[]>> =
+    dayFilter === "today"
+      ? fetchLiveBoards(
+          [...new Set(boardDefs.map((b) => b.origin))],
+          now
+        )
+      : Promise.resolve(new Map<string, LiveTrain[]>());
+
   // Drive-to-station / leave-by only applies to outbound (you drive from home
   // to the departure station). Compute once per unique origin station.
   const driveByOrigin: Record<string, number | null> = {};
@@ -143,8 +159,11 @@ export async function GET(req: Request) {
       "&travelmode=driving",
   };
 
+  const liveBoards = await liveBoardsPromise;
+
   const boards = boardDefs.map(({ origin, dest, short }) => {
     const driveSec = showLeave ? driveByOrigin[origin] : null;
+    const liveTrains = liveBoards.get(origin);
     const departures = nextDepartures(
       origin,
       dest,
@@ -156,6 +175,7 @@ export async function GET(req: Request) {
       ...d,
       leaveByEpochMs:
         driveSec != null ? d.depEpochMs - driveSec * 1000 - BUFFER_MS : null,
+      live: matchLiveStatus(liveTrains, d.depEpochMs),
     }));
     return {
       origin: STATION_NAMES[origin],

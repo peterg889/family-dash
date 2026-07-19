@@ -13,8 +13,9 @@ Family Dashboard — an NJ Transit "next trains" board with two front-ends:
    does the work (including the Maps drive times, with the key in Vercel env).
 
 Deploy: `main` is the production branch (Vercel git integration). Push to `main`
-→ auto-deploys → `family-dash-beta`. The Google Maps key lives in Vercel env
-(`GOOGLE_MAPS_API_KEY`), never in the repo or on the device.
+→ auto-deploys → `family-dash-beta`. Secrets live in Vercel env, never in the
+repo or on the device: the Google Maps key (`GOOGLE_MAPS_API_KEY`) and the
+NJ Transit real-time credentials (`NJT_API_USERNAME` / `NJT_API_PASSWORD`).
 
 ## Stations / boards
 
@@ -31,6 +32,19 @@ the deployed logic. `data/schedule.json` is a GTFS-derived schedule built by
 `scripts/build-schedule.mjs` (public NJ Transit feed, no API key). The service
 day is anchored at GTFS "noon − 12h" (not local midnight), which matters on the
 Nov 2026 DST fall-back.
+
+`lib/njtransit.ts` layers **real-time DepartureVision status** (delay / track /
+"ALL ABOARD" / cancelled) on top of that schedule. It calls the
+`raildata.njtransit.com` Train Data API (`getToken` → `getTrainSchedule`,
+credentials in `NJT_API_*` env), caches the token and each station board, and
+matches a live train to a scheduled departure by scheduled minute at the origin
+station (2-char station codes in `NJT_STATION_2CHAR`). The route only fetches it
+for *today* boards — the next-morning preview has no live data yet — and every
+path degrades to `live: null` when creds are missing or the API fails, so the
+board always works on the GTFS schedule alone. Each departure in the API JSON
+gains an optional `live` field; `app/page.tsx` renders it as a small badge.
+Surfacing `live` on the E-Ink screen is a possible follow-up (the firmware JSON
+parser already ignores the new field).
 
 ## E-Ink firmware
 
