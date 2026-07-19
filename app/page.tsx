@@ -1,6 +1,14 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactElement } from "react";
+
+type LiveStatus = {
+  state: "on-time" | "delayed" | "cancelled" | "boarding" | "unknown";
+  delayMin: number;
+  statusText: string;
+  track: string | null;
+  trainId: string | null;
+};
 
 type Departure = {
   depEpochMs: number;
@@ -13,6 +21,7 @@ type Departure = {
   headsign: string;
   durationMin: number;
   leaveByEpochMs: number | null;
+  live?: LiveStatus | null;
 };
 
 type Board = {
@@ -88,6 +97,32 @@ function Clock({ epoch, withDay, now }: { epoch: number; withDay?: boolean; now?
   );
 }
 
+/** Live delay / track / status from DepartureVision, when we have a match. */
+function LiveBadge({ live }: { live: LiveStatus }) {
+  const track =
+    live.track && live.state !== "cancelled" ? (
+      <span className="trk">Trk {live.track}</span>
+    ) : null;
+
+  let label: ReactElement | null = null;
+  if (live.state === "cancelled")
+    label = <span className="lv cancelled">cancelled</span>;
+  else if (live.state === "boarding")
+    label = <span className="lv boarding">all aboard</span>;
+  else if (live.state === "delayed")
+    label = <span className="lv late">+{live.delayMin} late</span>;
+  else if (live.state === "on-time")
+    label = <span className="lv ontime">on time</span>;
+
+  if (!label && !track) return null;
+  return (
+    <span className="live">
+      {label}
+      {track}
+    </span>
+  );
+}
+
 /**
  * One route as a table row-group: a route header row, then a row per
  * upcoming train with (leave) / depart / arrive going across — so the same
@@ -149,6 +184,7 @@ function BoardGroup({
               )}
               <td className="v">
                 <Clock epoch={d.depEpochMs} withDay now={now} />
+                {d.live && <LiveBadge live={d.live} />}
               </td>
               <td className="v">
                 <Clock epoch={d.arrEpochMs} />
