@@ -188,6 +188,10 @@ function main() {
       dep: origin.dep, // departure time at the origin station
       arr: dest.arr, // arrival time at the destination
       headsign: trip.trip_headsign,
+      // Train number (e.g. "6912") — matches the live DepartureVision TRAIN_ID,
+      // so real-time status can be joined to the right train unambiguously. NJT
+      // GTFS carries it in block_id (trip_short_name is empty in this feed).
+      train: trip.block_id || "",
     });
     usedServices.add(trip.service_id);
     usedRoutes.add(trip.route_id);

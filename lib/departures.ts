@@ -10,6 +10,7 @@ type Trip = {
   dep: string;
   arr: string;
   headsign: string;
+  train?: string; // train number (GTFS block_id), for live-status matching
 };
 
 type StationCoord = { name: string; lat: number; lon: number };
@@ -36,6 +37,7 @@ export type Departure = {
   color: string;
   headsign: string;
   durationMin: number;
+  train: string; // train number, for joining live DepartureVision status
 };
 
 // --- timezone helpers --------------------------------------------------------
@@ -190,6 +192,7 @@ export function nextDepartures(
         color: route?.color ?? "334155",
         headsign: trip.headsign,
         durationMin: Math.max(0, Math.round((arrEpochMs - depEpochMs) / 60000)),
+        train: trip.train ?? "",
       });
     }
   }

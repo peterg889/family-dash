@@ -74,7 +74,11 @@ field is simply `null`) — nothing breaks. The credentials are only ever read
 server-side in the API route; they never reach the browser or the E-Ink device.
 
 How it works: the client fetches a token (`getToken`), pulls each origin
-station's live board (`getTrainSchedule`), and matches a live train to a
-scheduled departure by its scheduled minute. Token and per-station boards are
-cached to stay well under NJ Transit's daily request limits. Real-time data only
-exists for the near term, so the "next morning" preview stays schedule-only.
+station's live board (`getTrainSchedule19Rec` — the light variant without
+per-train stop lists), and joins a live train to a scheduled departure by **train
+number** (the GTFS `block_id`, which equals the live `TRAIN_ID`), falling back to
+the scheduled minute. Matching by train number keeps it correct at busy stations
+like NY Penn and Hoboken where several lines depart the same minute. Token and
+per-station boards are cached to stay well under NJ Transit's daily request
+limits. Real-time data only exists for the near term, so the "next morning"
+preview stays schedule-only.

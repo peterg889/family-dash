@@ -232,10 +232,6 @@ body::before {
 .train-row .v .live .lv.boarding {
   color: var(--green);
 }
-.train-row .v .live .lv.ontime {
-  color: var(--dim);
-  opacity: 0.85;
-}
 .train-row .v .live .trk {
   color: var(--amber-soft);
 }

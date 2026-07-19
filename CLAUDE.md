@@ -35,16 +35,22 @@ Nov 2026 DST fall-back.
 
 `lib/njtransit.ts` layers **real-time DepartureVision status** (delay / track /
 "ALL ABOARD" / cancelled) on top of that schedule. It calls the
-`raildata.njtransit.com` Train Data API (`getToken` → `getTrainSchedule`,
-credentials in `NJT_API_*` env), caches the token and each station board, and
-matches a live train to a scheduled departure by scheduled minute at the origin
-station (2-char station codes in `NJT_STATION_2CHAR`). The route only fetches it
-for *today* boards — the next-morning preview has no live data yet — and every
+`raildata.njtransit.com` Train Data API (`getToken` → `getTrainSchedule19Rec` —
+the light, stop-list-free variant, credentials in `NJT_API_*` env), caches the
+token and each station board, and joins a live train to a scheduled departure by
+**train number** (GTFS `block_id` == live `TRAIN_ID`, normalized for the feed's
+zero-padding), falling back to the scheduled minute. Train-number matching is
+what disambiguates busy stations (NY Penn / Hoboken) where many lines share a
+minute. Station 2-char codes are in `NJT_STATION_2CHAR`. The route only fetches
+live data for *today* boards — the next-morning preview has none yet — and every
 path degrades to `live: null` when creds are missing or the API fails, so the
-board always works on the GTFS schedule alone. Each departure in the API JSON
-gains an optional `live` field; `app/page.tsx` renders it as a small badge.
-Surfacing `live` on the E-Ink screen is a possible follow-up (the firmware JSON
-parser already ignores the new field).
+board always works on the GTFS schedule alone. `NJT` quirks handled: `SEC_LATE`
+of `-60` is a "no estimate yet" sentinel (not early); a blank `STATUS` is normal;
+`TRACK` "Single" (Gladstone branch) is not surfaced. Each departure in the API
+JSON gains an optional `live` field; `app/page.tsx` renders exceptions (delay /
+cancelled / all-aboard) plus track as a small badge. Surfacing `live` on the
+E-Ink screen is a possible follow-up (the firmware JSON parser already ignores
+the new field).
 
 ## E-Ink firmware
 

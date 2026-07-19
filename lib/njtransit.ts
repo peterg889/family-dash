@@ -5,12 +5,14 @@
  * Uses the raildata.njtransit.com REST API (the developer.njtransit.com
  * portal):
  *
- *   POST getToken          (username, password) -> { Authenticated, UserToken }
- *   POST getTrainSchedule  (token, station)     -> { STATION_2CHAR, ITEMS: [...] }
+ *   POST getToken               (username, password)  -> { Authenticated, UserToken }
+ *   POST getTrainSchedule19Rec  (token, station, line) -> { STATION_2CHAR, ITEMS: [...] }
  *
- * getTrainSchedule returns the same data as DepartureVision — the next ~19
- * real-time trains at one station — so it only covers the near term. There is
- * no live data for tomorrow's trains; callers should skip the lookup then.
+ * getTrainSchedule19Rec returns the same DepartureVision data as
+ * getTrainSchedule — the next ~19 real-time trains at one station — but without
+ * each train's full stop list (which we don't use), so the payload is ~10x
+ * smaller. It only covers the near term; there is no live data for tomorrow's
+ * trains, so callers should skip the lookup then.
  *
  * Credentials come from the environment and never touch the repo:
  *
@@ -139,20 +141,31 @@ export function parseNjtDate(s: string | undefined | null): number | null {
 
 // --- status classification ---------------------------------------------------
 
+// NJT reports SEC_LATE as -60 (and other negatives) when there's no live
+// estimate yet — the train is scheduled but not actively tracked. Treat any
+// negative as "no delay known" rather than "early".
+function delayMinutes(secLate: number): number {
+  return secLate > 0 ? Math.round(secLate / 60) : 0;
+}
+
 /** Turn the raw STATUS text + SEC_LATE into a normalized LiveStatus. */
 function classify(train: LiveTrain): LiveStatus {
   const text = (train.status || "").trim();
   const up = text.toUpperCase();
-  const delayMin = Math.max(0, Math.round((train.secLate || 0) / 60));
-  const track = train.track && train.track.trim() ? train.track.trim() : null;
+  const delayMin = delayMinutes(train.secLate);
+  // A single-track branch (e.g. Gladstone) reports TRACK "Single" — not a
+  // platform a rider picks, so don't surface it as a track number.
+  const rawTrack = (train.track || "").trim();
+  const track =
+    rawTrack && rawTrack.toLowerCase() !== "single" ? rawTrack : null;
   const trainId = train.trainId ? train.trainId : null;
 
   let state: LiveState;
   if (up.includes("CANCEL")) state = "cancelled";
   else if (up.includes("ABOARD") || up.includes("BOARD")) state = "boarding";
+  else if (up.includes("SUSPEND")) state = "cancelled";
   else if (delayMin >= 1) state = "delayed";
-  else if (text) state = "on-time";
-  else state = "unknown";
+  else state = "on-time";
 
   return { state, delayMin, statusText: text, track, trainId };
 }
@@ -263,9 +276,10 @@ async function fetchStationBoard(
     const token = await getToken(now, attempt === 1);
     if (!token) return [];
 
-    const json = (await postForm("getTrainSchedule", {
+    const json = (await postForm("getTrainSchedule19Rec", {
       token,
       station: station2char,
+      line: "",
     })) as RawStation | null;
 
     const items = itemsOf(json);
@@ -302,21 +316,53 @@ export async function fetchLiveBoards(
   return out;
 }
 
-// Match a scheduled departure to its live train within this window of its
-// scheduled minute (NJT's SCHED_DEP_DATE should agree with GTFS to the second,
-// but allow slack for rounding / minor feed drift).
+// Time-match window: NJT's SCHED_DEP_DATE should agree with GTFS to within a
+// minute, but allow slack for rounding / minor feed drift.
 const MATCH_WINDOW_MS = 90_000;
 
+// A train-number match is trusted only if it's also in the same neighborhood in
+// time, so a number reused on a later service day can't hijack today's board.
+const TRAIN_ID_WINDOW_MS = 3 * 3600_000;
+
+/** Normalize a train number for comparison (strip leading zeros; upper-case). */
+function normId(id: string | null | undefined): string {
+  return String(id ?? "").trim().replace(/^0+/, "").toUpperCase();
+}
+
 /**
- * Find the live status for a scheduled departure by matching on the scheduled
- * departure time at the origin station. Returns null when there's no live
- * train near that time (e.g. beyond the ~19-train real-time window).
+ * Find the live status for a scheduled departure. Matches on train number
+ * first (GTFS block_id == live TRAIN_ID) — exact and unambiguous even where
+ * many lines share a station — and falls back to the closest scheduled time
+ * within a minute. Returns null when there's no live train for it (e.g. beyond
+ * the ~19-train real-time window).
  */
 export function matchLiveStatus(
   trains: LiveTrain[] | undefined,
-  schedDepEpochMs: number
+  schedDepEpochMs: number,
+  trainNumber?: string
 ): LiveStatus | null {
   if (!trains || trains.length === 0) return null;
+
+  // 1) Train-number match.
+  const want = normId(trainNumber);
+  if (want) {
+    let best: LiveTrain | null = null;
+    let bestDiff = Infinity;
+    for (const t of trains) {
+      if (normId(t.trainId) !== want) continue;
+      const diff =
+        t.schedDepEpochMs == null
+          ? 0
+          : Math.abs(t.schedDepEpochMs - schedDepEpochMs);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        best = t;
+      }
+    }
+    if (best && bestDiff <= TRAIN_ID_WINDOW_MS) return classify(best);
+  }
+
+  // 2) Scheduled-time fallback.
   let best: LiveTrain | null = null;
   let bestDiff = Infinity;
   for (const t of trains) {
