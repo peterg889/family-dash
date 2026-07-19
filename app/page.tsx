@@ -104,6 +104,8 @@ function LiveBadge({ live }: { live: LiveStatus }) {
       <span className="trk">Trk {live.track}</span>
     ) : null;
 
+  // Only flag exceptions — an on-time train just shows its track, so real
+  // problems stand out on a glanceable board.
   let label: ReactElement | null = null;
   if (live.state === "cancelled")
     label = <span className="lv cancelled">cancelled</span>;
@@ -111,8 +113,6 @@ function LiveBadge({ live }: { live: LiveStatus }) {
     label = <span className="lv boarding">all aboard</span>;
   else if (live.state === "delayed")
     label = <span className="lv late">+{live.delayMin} late</span>;
-  else if (live.state === "on-time")
-    label = <span className="lv ontime">on time</span>;
 
   if (!label && !track) return null;
   return (

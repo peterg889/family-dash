@@ -175,7 +175,7 @@ export async function GET(req: Request) {
       ...d,
       leaveByEpochMs:
         driveSec != null ? d.depEpochMs - driveSec * 1000 - BUFFER_MS : null,
-      live: matchLiveStatus(liveTrains, d.depEpochMs),
+      live: matchLiveStatus(liveTrains, d.depEpochMs, d.train),
     }));
     return {
       origin: STATION_NAMES[origin],
