@@ -52,6 +52,19 @@ bool board_fetch(BoardData& out, time_t now) {
       dv.leaveEpoch = ms_to_epoch(dep["leaveByEpochMs"] | 0LL);
       dv.depEpoch = ms_to_epoch(dep["depEpochMs"] | 0LL);
       dv.arrEpoch = ms_to_epoch(dep["arrEpochMs"] | 0LL);
+      dv.live = LIVE_NONE;
+      dv.delayMin = 0;
+      dv.track[0] = 0;
+      JsonObject lv = dep["live"];
+      if (!lv.isNull()) {
+        const char* st = lv["state"] | "";
+        if (!strcmp(st, "delayed")) dv.live = LIVE_DELAYED;
+        else if (!strcmp(st, "cancelled")) dv.live = LIVE_CANCELLED;
+        else if (!strcmp(st, "boarding")) dv.live = LIVE_BOARDING;
+        else dv.live = LIVE_ON_TIME;
+        dv.delayMin = (int16_t)(lv["delayMin"] | 0);
+        strlcpy(dv.track, lv["track"] | "", sizeof(dv.track));
+      }
     }
   }
 

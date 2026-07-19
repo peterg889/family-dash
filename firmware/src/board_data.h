@@ -7,10 +7,26 @@
 #include <stdint.h>
 #include <time.h>
 
+// Live DepartureVision status. LIVE_NONE = no live data for this train (e.g.
+// next-morning preview, or the upstream API was unreachable); LIVE_ON_TIME
+// covers both "on-time" and "unknown" — tracked, nothing to flag.
+enum LiveState : uint8_t {
+  LIVE_NONE = 0,
+  LIVE_ON_TIME,
+  LIVE_DELAYED,
+  LIVE_CANCELLED,
+  LIVE_BOARDING,
+};
+
 struct DepView {
-  time_t leaveEpoch;  // when to leave home (depart - drive - buffer)
+  time_t leaveEpoch;  // when to leave home (depart - drive - buffer);
+                      // 0 on evening (city->home) boards, which have no
+                      // drive leg — count down to depEpoch instead
   time_t depEpoch;    // train departs origin
   time_t arrEpoch;    // train arrives destination
+  uint8_t live;       // LiveState
+  int16_t delayMin;   // minutes late when LIVE_DELAYED
+  char track[8];      // assigned track, "" until known
 };
 
 struct BoardView {
