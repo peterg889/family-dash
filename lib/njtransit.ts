@@ -26,6 +26,8 @@
  * station and the auth token is reused until it stops working.
  */
 
+import { unstable_cache, revalidateTag } from "next/cache";
+
 const TZ = "America/New_York";
 
 const BASE =
@@ -172,10 +174,6 @@ function classify(train: LiveTrain): LiveStatus {
 
 // --- token auth --------------------------------------------------------------
 
-// A token is valid for a while; reuse it and only re-auth when a call fails.
-const TOKEN_TTL_MS = 30 * 60_000;
-let tokenCache: { token: string; at: number } | null = null;
-
 async function postForm(
   path: string,
   fields: Record<string, string>
@@ -194,26 +192,76 @@ async function postForm(
   }
 }
 
-/** Fetch (and cache) an API token, or null when creds are missing / auth fails. */
-async function getToken(now: number, forceRefresh = false): Promise<string | null> {
+// NJT strictly caps token generation — only a handful of getToken calls per day
+// — and the token carries no expiry, so it's meant to be minted rarely and
+// reused until it stops working. Module state doesn't survive Vercel's
+// serverless instances (each cold start would re-auth and quickly exhaust the
+// daily cap), so the token lives in Next's Data Cache, which is shared across
+// instances and cold starts. A new one is minted only when the cached token is
+// rejected by a data call (see fetchStationBoard) or the safety window elapses.
+const TOKEN_TAG = "njt-token";
+const TOKEN_MAX_AGE_S = 12 * 60 * 60; // proactive refresh ceiling (~2 mints/day)
+
+// Mint a brand-new token. Throws on missing creds / failed auth so a bad result
+// is never written to the cache.
+async function mintToken(): Promise<string> {
   const username = process.env.NJT_API_USERNAME;
   const password = process.env.NJT_API_PASSWORD;
-  if (!username || !password) return null;
-
-  if (!forceRefresh && tokenCache && now - tokenCache.at < TOKEN_TTL_MS) {
-    return tokenCache.token;
-  }
+  if (!username || !password) throw new Error("njt: missing credentials");
 
   const json = (await postForm("getToken", { username, password })) as
     | { Authenticated?: string; UserToken?: string }
     | null;
   const token = json?.UserToken;
   if (!token || json?.Authenticated === "False") {
-    tokenCache = null;
+    throw new Error("njt: authentication failed");
+  }
+  return token;
+}
+
+// Collapse concurrent mints within one instance into a single getToken call —
+// the station boards refresh in parallel and would otherwise each re-auth.
+let mintInFlight: Promise<string> | null = null;
+function mintTokenOnce(): Promise<string> {
+  if (!mintInFlight) {
+    mintInFlight = mintToken().finally(() => {
+      mintInFlight = null;
+    });
+  }
+  return mintInFlight;
+}
+
+// The token, kept in the shared Data Cache across instances (see above).
+const cachedToken = unstable_cache(mintTokenOnce, [TOKEN_TAG], {
+  revalidate: TOKEN_MAX_AGE_S,
+  tags: [TOKEN_TAG],
+});
+
+/** The shared cached token, or null when creds are missing / auth fails. */
+async function getToken(): Promise<string | null> {
+  try {
+    return await cachedToken();
+  } catch {
     return null;
   }
-  tokenCache = { token, at: now };
-  return token;
+}
+
+/**
+ * Called after the cached token was rejected by a data call: drop the shared
+ * cache entry (so other instances re-mint too) and mint a fresh token for this
+ * request. Rare — the token stays valid for a long time.
+ */
+async function refreshToken(): Promise<string | null> {
+  try {
+    revalidateTag(TOKEN_TAG);
+  } catch {
+    // revalidateTag only works within a request scope; ignore otherwise.
+  }
+  try {
+    return await mintTokenOnce();
+  } catch {
+    return null;
+  }
 }
 
 // --- board fetch -------------------------------------------------------------
@@ -273,7 +321,9 @@ async function fetchStationBoard(
   if (hit && now - hit.at < BOARD_TTL_MS) return hit.trains;
 
   for (let attempt = 0; attempt < 2; attempt++) {
-    const token = await getToken(now, attempt === 1);
+    // Reuse the shared cached token; only on a second try force a fresh one
+    // (the cached token was just rejected — most likely it expired).
+    const token = attempt === 0 ? await getToken() : await refreshToken();
     if (!token) return [];
 
     const json = (await postForm("getTrainSchedule19Rec", {
@@ -283,12 +333,7 @@ async function fetchStationBoard(
     })) as RawStation | null;
 
     const items = itemsOf(json);
-    if (items === null) {
-      // Likely an expired/invalid token — drop it and retry once with a fresh one.
-      tokenCache = null;
-      continue;
-    }
-
+    if (items === null) continue; // unrecognized shape -> likely a bad token; retry
     const trains = items.map(toLiveTrain);
     boardCache.set(station2char, { at: now, trains });
     return trains;
