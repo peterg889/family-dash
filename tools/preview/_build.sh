@@ -7,7 +7,22 @@
 PREVIEW_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREVIEW_ROOT="$PREVIEW_DIR/../.."
 PREVIEW_SRC="$PREVIEW_ROOT/firmware/src"
-GFX_DIR="${GFX_DIR:-$PREVIEW_ROOT/firmware/.pio/libdeps/crowpanel_epaper42/Adafruit GFX Library}"
+PREVIEW_LIBDEPS="$PREVIEW_ROOT/firmware/.pio/libdeps/crowpanel_epaper42"
+
+# PlatformIO can hold two copies of Adafruit GFX: the version pinned in
+# platformio.ini (in "Adafruit GFX Library@<version>") and whatever GxEPD2's own
+# unpinned dependency pulled in (in "Adafruit GFX Library"). Use the pinned one —
+# the one the firmware is actually built with — and fall back to any copy that
+# has the sources.
+find_gfx() {
+    local d
+    for d in "$PREVIEW_LIBDEPS"/Adafruit\ GFX\ Library@* "$PREVIEW_LIBDEPS/Adafruit GFX Library"; do
+        [ -f "$d/Adafruit_GFX.cpp" ] && { echo "$d"; return; }
+        [ -f "$d/src/Adafruit_GFX.cpp" ] && { echo "$d/src"; return; }
+    done
+    echo "$PREVIEW_LIBDEPS/Adafruit GFX Library"
+}
+GFX_DIR="${GFX_DIR:-$(find_gfx)}"
 
 build_preview() {
     if [ ! -f "$GFX_DIR/Adafruit_GFX.cpp" ]; then
