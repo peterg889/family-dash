@@ -173,7 +173,7 @@ describe("GET /api/departures", () => {
     );
     const { body } = await call("?direction=outbound");
     if (body.mode !== "next-morning") {
-      expect(body.alerts).toEqual([{ text: "M&E trains are subject to 20-minute delays." }]);
+      expect(body.alerts).toEqual([{ text: "M&E trains are subject to 20-minute delays.", urgent: true }]);
     }
     expect((await call(`?now=${at(7)}`)).body.alerts).toEqual([]);
   });

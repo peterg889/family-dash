@@ -28,6 +28,7 @@ static void build_filter(JsonDocument& f) {
   f["status"]["schedule"]["expired"] = true;
   f["status"]["live"] = true;
   f["alerts"][0]["text"] = true;
+  f["alerts"][0]["urgent"] = true;
   JsonObject b = f["boards"][0].to<JsonObject>();
   b["origin"] = true;
   b["destShort"] = true;
@@ -118,10 +119,13 @@ bool board_parse(const char* json, size_t len, BoardData& out, time_t now,
   else if (!strcmp(lf, "off")) t.liveFeed = FEED_OFF;
   else t.liveFeed = FEED_UNKNOWN;
 
-  // Service alerts: keep the first one's text (the screen has one line for it).
+  // Service alerts: the sign has one line, so it only takes alerts the server
+  // marks as affecting trains (delays, cancellations, suspensions) — general
+  // notices stay on the web page. Keep the first such alert's text.
   for (JsonObject a : doc["alerts"].as<JsonArray>()) {
     const char* text = a["text"] | "";
     if (!text[0]) continue;
+    if (!(a["urgent"] | false)) continue;
     if (t.nAlerts == 0) copy(t.alert, sizeof(t.alert), text);
     t.nAlerts++;
   }

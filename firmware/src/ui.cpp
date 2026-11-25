@@ -44,8 +44,8 @@ static const int Y_SIDE_A = 90;   //                             by 7:17a
 static const int Y_SIDE_B = 118;  //                             [+6 late]
 static const int Y_DETAIL = 152;  // Morristown 7:38a -> Penn 8:54a
 static const int Y_CAP = 172;     // LEAVE BY ----------------------
-static const int Y_ROW = 192;     // first later train
-static const int ROW_PITCH = 20;
+static const int Y_ROW = 196;     // first later train
+static const int ROW_PITCH = 24;  // four airy rows rather than five tight ones
 static const int FOOTER_TOP = 278;  // bottom status band
 static const int FOOTER_BASE = 294;
 
@@ -327,7 +327,27 @@ static void draw_alert(GFXcanvas1& c, const char* text, time_t now) {
     return;
   }
 
-  // Greedy word wrap, leaving room on the right for the "2/3" counter.
+  // Too long for the line: cut it at a word and end with "...". (The sign only
+  // gets alerts that affect trains; the full text is on the web page.)
+  {
+    const int avail = RIGHT - x - text_w(c, f, "...");
+    int cut = (int)strlen(clean);
+    char part[200];
+    while (cut > 0) {
+      while (cut > 0 && clean[cut - 1] != ' ') cut--;  // back to a word start
+      while (cut > 0 && clean[cut - 1] == ' ') cut--;  // and off the space
+      snprintf(part, sizeof(part), "%.*s", cut, clean);
+      if (text_w(c, f, part) <= avail) break;
+    }
+    if (cut <= 0) snprintf(part, sizeof(part), "%.20s", clean);
+    char line[204];
+    snprintf(line, sizeof(line), "%s...", part);
+    draw_left(c, f, x, FOOTER_BASE, INK, line);
+    (void)now;
+    return;
+  }
+
+  // (Unused: stepping a long alert one line a minute.)
   const int room = RIGHT - x - 34;
   static const int MAX_LINES = 8;
   int start[MAX_LINES], count[MAX_LINES], n = 0;
@@ -561,7 +581,8 @@ static void draw_row(GFXcanvas1& c, const BoardData& data, const DepRef& r,
   // without one the first column already is the train's time.
   if (leave) draw_left(c, f, X_TRAIN, y, INK, dp);
 
-  // Right-hand end: "Hoboken 8:28a", or the destination and a pill.
+  // Right-hand end: "Hoboken 8:28a" — the owner wants the arrival time on
+  // every row — or, when there is something to flag, the destination and a pill.
   char tail[32];
   int tailRight = RIGHT;
   if (badge[0]) {

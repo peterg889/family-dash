@@ -8,6 +8,7 @@ import {
 } from "@/lib/departures";
 import { driveTo, driveToAddress, type DriveEstimate } from "@/lib/driving";
 import {
+  alertAffectsTrains,
   fetchStationBoards,
   hasCredentials,
   stationAlerts,
@@ -334,8 +335,12 @@ export async function GET(req: Request) {
 
   // NJ Transit's own service alerts for these stations — they arrive with the
   // boards we already fetched.
+  // `urgent` marks the ones that say trains are affected; the sign shows only those.
   const alerts = wantLive
-    ? stationAlerts(liveRequests.map((r) => r.code)).map((text) => ({ text }))
+    ? stationAlerts(liveRequests.map((r) => r.code)).map((text) => ({
+        text,
+        urgent: alertAffectsTrains(text),
+      }))
     : [];
 
   // What each data source is doing, so screens can say what's wrong instead of

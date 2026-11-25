@@ -23,7 +23,8 @@
  },
  "alerts": [
   {
-   "text": "M&E trains are subject to 20-minute delays due to signal problems near Summit."
+   "text": "M&E trains are subject to 20-minute delays due to signal problems near Summit.",
+   "urgent": true
   }
  ],
  "commute": {

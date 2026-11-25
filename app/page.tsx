@@ -67,7 +67,7 @@ type ApiResponse = {
   direction?: Direction;
   showLeave?: boolean;
   status?: Status;
-  alerts?: { text: string }[];
+  alerts?: { text: string; urgent?: boolean }[];
   commute?: Commute | null;
   boards: Board[];
 };
@@ -346,7 +346,10 @@ export default function Page() {
           ))}
         </div>
 
-        {data?.alerts?.map((a) => (
+        {/* Only alerts that say trains are affected — not bus or general notices. */}
+        {data?.alerts
+          ?.filter((a) => a.urgent)
+          .map((a) => (
           <div className="alert" key={a.text}>
             <span className="alert-tag">NJ Transit</span> {a.text}
           </div>
