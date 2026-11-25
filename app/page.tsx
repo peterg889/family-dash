@@ -67,7 +67,7 @@ type ApiResponse = {
   direction?: Direction;
   showLeave?: boolean;
   status?: Status;
-  alerts?: { text: string }[];
+  alerts?: { text: string; urgent?: boolean }[];
   commute?: Commute | null;
   boards: Board[];
 };

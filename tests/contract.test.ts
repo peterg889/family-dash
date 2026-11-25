@@ -95,7 +95,7 @@ describe("what the sign is sent", () => {
     expect(boards[0].driveMin).toBe(19);
     expect(boards[0].departures.length).toBeGreaterThanOrEqual(9); // more than the web page's 5
     expect(body.alerts).toEqual([
-      { text: "M&E trains are subject to 20-minute delays due to signal problems near Summit." },
+      { text: "M&E trains are subject to 20-minute delays due to signal problems near Summit.", urgent: true },
     ]);
   });
 

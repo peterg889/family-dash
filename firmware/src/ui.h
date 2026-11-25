@@ -14,7 +14,7 @@ static const int UI_W = 400;
 static const int UI_H = 300;
 
 // Rows of later trains under the big one; one "page" for the up/down buttons.
-static const int UI_ROWS = 5;
+static const int UI_ROWS = 4;
 
 // How old the board may get before the screen says so. By day the device
 // refetches every 3 min, so 6 min means at least one fetch has already failed;

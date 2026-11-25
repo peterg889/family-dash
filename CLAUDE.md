@@ -114,7 +114,7 @@ is: no transfers, no Morristown→Hoboken, no pickup view).
 drive: live|earlier|none|off }`, `commute`, and `boards[]` each with
 `driveMin`, `driveSource`, `driveMeasuredAtMs`, `source` and `departures[]` (`depEpochMs`,
 `arrEpochMs`, `leaveByEpochMs`, `train`, `source: live|schedule`, `live`).
-Also `alerts[]` (`{text}` — NJ Transit's station messages, which arrive with
+Also `alerts[]` (`{text, urgent}` — NJ Transit's station messages, which arrive with
 the boards at no extra cost) and `status.device.lastSeenMs` (the sign's last
 check-in). `?now=<epochMs>` overrides the clock for testing; it never touches
 live data and is never cached. Responses are edge-cached for 15 s.
@@ -151,13 +151,15 @@ See `firmware/README.md` for the full board spec, pinout, and gotchas. Key facts
   from both stations, ordered by when you have to leave the house. A 48 pt
   countdown ("LEAVE IN 11 min") plus "by 7:16a" for the next catchable train;
   beyond 90 minutes, on a later day, and all night it shows the clock time
-  instead ("TOMORROW • LEAVE AT 6:08 am"). Below it, five one-line rows:
-  leave-by, station, train → arrival. No track numbers; delay pills only from
-  3 minutes; a cancelled train is struck through and never the hero. Up/down
+  instead ("TOMORROW • LEAVE AT 6:08 am"). Below it, four roomy one-line rows:
+  leave-by, station, train → destination (no arrival time — the owner found
+  five rows with arrival times cluttered). No track numbers; delay pills only
+  from 3 minutes; a cancelled train is struck through and never the hero. Up/down
   pages through later trains and returns by itself after 60 s. It never shows
   trains home, transfers, or a pickup view (owner's decisions).
 - **Bottom band**, by priority: OFFLINE banner (>30 min) · "updated N min ago"
-  (>6 min) · NJ Transit alert (long ones step a line a minute) · "schedule only
+  (>6 min) · NJ Transit alert, one line, only if the server marks it `urgent`
+  (it says trains are affected; general notices stay on the web page) · "schedule only
   - no live status" · "timetable out of date". WiFi down, server unreachable,
   expired timetable and "setting the clock" each have their own full screen —
   it never says "no trains" for a different problem.

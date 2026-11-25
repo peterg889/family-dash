@@ -16,6 +16,7 @@ import {
   fetchStationBoard,
   matchLiveStatus,
   parseNjtDate,
+  alertAffectsTrains,
   parseStationMessages,
   stationAlerts,
   toLiveTrain,
@@ -125,6 +126,22 @@ describe("station messages (service alerts)", () => {
     expect(many).toHaveLength(3);
     expect(many[0].length).toBeLessThanOrEqual(240);
   });
+  it("are marked urgent only when they say trains are affected", () => {
+    for (const t of [
+      "M&E trains are subject to 20-minute delays due to signal problems.",
+      "Train 6632 is cancelled.",
+      "Gladstone Branch service is suspended in both directions.",
+      "Morris & Essex trains are running late following an earlier disabled train.",
+      "There is no rail service between Summit and Hoboken.",
+    ]) expect(alertAffectsTrains(t), t).toBe(true);
+    for (const t of [
+      // the real advisory that was up on 25 Nov 2026
+      "NJ TRANSIT is tracking a storm system bringing periods of heavy rain and gusty winds to New Jersey Thursday and into Friday. NJ TRANSIT rail tickets and passes will be cross honored by NJ TRANSIT Bus on Thursday, November 26.",
+      "The elevator at Morristown is out of service.",
+      "Trains are operating on a holiday schedule on Thursday.",
+    ]) expect(alertAffectsTrains(t), t).toBe(false);
+  });
+
   it("ride along with the board fetch — no extra call", async () => {
     const calls = stubFetch((url) =>
       url.endsWith("/getToken")

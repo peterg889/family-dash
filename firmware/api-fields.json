@@ -6,6 +6,7 @@
   "status.schedule.expired",
   "status.live",
   "alerts[].text",
+  "alerts[].urgent",
   "boards[].origin",
   "boards[].destShort",
   "boards[].driveMin",

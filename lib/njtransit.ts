@@ -489,6 +489,17 @@ export function parseStationMessages(json: unknown): string[] {
   return out;
 }
 
+/**
+ * Does this alert say trains are affected (delays, cancellations, suspended
+ * service)? Those are worth a line on the sign; a general notice — a weather
+ * advisory, cross-honoring, an elevator — is not.
+ */
+export function alertAffectsTrains(text: string): boolean {
+  return /\b(delay\w*|cancel\w*|suspend\w*|suspension|no (train |rail )?service|not (running|operating)|subject to|running late|disabled train)\b/i.test(
+    text
+  );
+}
+
 export type BoardVariant = "full" | "light";
 
 /**
