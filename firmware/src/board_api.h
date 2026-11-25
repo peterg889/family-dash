@@ -1,9 +1,9 @@
-// firmware/src/board_api.h — fetch + parse the live family-dash board.
+// firmware/src/board_api.h — fetch the live family-dash board over HTTPS.
 #pragma once
 
 #include "board_data.h"
 
-// Fetch BOARD_API_URL over HTTPS and parse it into `out`.
+// Fetch BOARD_API_URL and parse it into `out` (board_parse.h does the parsing).
 //
 // On success: replaces the board in `out`, sets out.ok, clears
 // out.failStreak, and stamps out.fetchedAt (`now` when `clock_valid`,

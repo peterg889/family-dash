@@ -1,0 +1,53 @@
+# Hourly look at the live dashboard. When something needs a person — server not
+# answering, timetable running out, NJ Transit live status gone, no drive times,
+# no trains, or the E-Ink sign gone quiet — it opens ONE GitHub issue (GitHub
+# emails the owner), and closes it again when everything is back. No hourly spam.
+name: Health check
+
+on:
+  schedule:
+    - cron: "17 11-23,0-3 * * *" # hourly, roughly 6 AM–10 PM New York
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: health
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check the live dashboard
+        id: check
+        continue-on-error: true
+        run: node scripts/health-check.mjs | tee health.txt
+
+      - name: Open or close the alert issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEALTHY: ${{ steps.check.outcome == 'success' }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          open=$(gh issue list --state open --search 'in:title "Train board needs attention"' --json number --jq '.[0].number // empty')
+          if [ "$HEALTHY" = "true" ]; then
+            if [ -n "$open" ]; then
+              gh issue close "$open" --comment "Back to normal as of $(TZ=America/New_York date '+%a %-I:%M %p')."
+            fi
+            exit 0
+          fi
+          # The @mention makes sure the owner is emailed even if they aren't watching the repo.
+          body="$(printf 'The hourly check found:\n\n%s\n\nChecked %s. This issue closes itself when the board is healthy again.\n\ncc @%s\n' "$(cat health.txt)" "$(TZ=America/New_York date '+%a %-I:%M %p')" "$OWNER")"
+          if [ -z "$open" ]; then
+            gh issue create --title "Train board needs attention" --body "$body"
+          else
+            echo "Issue #$open is already open; not opening another."
+          fi

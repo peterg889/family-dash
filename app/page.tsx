@@ -44,7 +44,6 @@ type Commute = {
   driveSource?: DriveSource;
   driveMeasuredAtMs?: number | null;
   etaEpochMs: number | null;
-  mapsUrl: string;
 };
 
 // What each data source is doing — so the page can say what's wrong instead of
@@ -59,13 +58,17 @@ type Status = {
   drive: "live" | "earlier" | "none" | "off";
 };
 
+type Direction = "outbound" | "inbound";
+
 type ApiResponse = {
   now: number;
   generatedAt: string;
   headline?: string;
+  direction?: Direction;
   showLeave?: boolean;
   status?: Status;
-  commute?: Commute;
+  alerts?: { text: string }[];
+  commute?: Commute | null;
   boards: Board[];
 };
 
@@ -267,6 +270,10 @@ export default function Page() {
   const [now, setNow] = useState(() => Date.now());
   const [fetchedAt, setFetchedAt] = useState(0);
   const [error, setError] = useState(false);
+  // Which way to look. "auto" lets the server pick by time of day (to the city
+  // in the morning, home in the evening); tapping a direction pins it until
+  // the page is reloaded.
+  const [want, setWant] = useState<Direction | "auto">("auto");
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
@@ -277,7 +284,10 @@ export default function Page() {
     let active = true;
     async function load() {
       try {
-        const res = await fetch("/api/departures", { cache: "no-store" });
+        const res = await fetch(
+          want === "auto" ? "/api/departures" : `/api/departures?direction=${want}`,
+          { cache: "no-store" }
+        );
         if (!res.ok) throw new Error("bad response");
         const json: ApiResponse = await res.json();
         if (active) {
@@ -295,7 +305,7 @@ export default function Page() {
       active = false;
       clearInterval(id);
     };
-  }, []);
+  }, [want]);
 
   const clockTime = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
@@ -316,6 +326,31 @@ export default function Page() {
           </span>
           <span className="clock">{clockTime}</span>
         </div>
+
+        <div className="direction" role="group" aria-label="Direction">
+          {(
+            [
+              ["outbound", "To the city"],
+              ["inbound", "Heading home"],
+            ] as [Direction, string][]
+          ).map(([dir, label]) => (
+            <button
+              key={dir}
+              type="button"
+              className={data?.direction === dir ? "on" : ""}
+              aria-pressed={data?.direction === dir}
+              onClick={() => setWant(dir)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {data?.alerts?.map((a) => (
+          <div className="alert" key={a.text}>
+            <span className="alert-tag">NJ Transit</span> {a.text}
+          </div>
+        ))}
 
         {data &&
           notices(data, stale, error).map((n) => (
@@ -351,14 +386,9 @@ export default function Page() {
       </section>
 
       {data?.commute?.driveMin != null && (
-        <a
-          className="panel commute"
-          href={data.commute.mapsUrl}
-          target="_blank"
-          rel="noreferrer"
-        >
+        <div className="panel commute">
           <span className="cm-left">
-            <span className="cm-kicker">school run · drive</span>
+            <span className="cm-kicker">drive time</span>
             <span className="cm-name">{data.commute.name}</span>
           </span>
           <span className="cm-right">
@@ -372,7 +402,7 @@ export default function Page() {
               </span>
             )}
           </span>
-        </a>
+        </div>
       )}
     </main>
   );

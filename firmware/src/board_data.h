@@ -1,14 +1,14 @@
 // firmware/src/board_data.h — parsed shape of the family-dash /api/departures
-// response. Shared by board_api.cpp (fills it from the fetched JSON) and
-// ui.cpp (renders it). Kept free of Arduino headers so the native preview can
-// build ui.cpp with mock data.
+// response. Shared by board_parse.cpp (fills it from the fetched JSON) and
+// ui.cpp (renders it). Kept free of Arduino headers so the native preview and
+// the contract check can build against it on a laptop.
 #pragma once
 
 #include <stdint.h>
 #include <time.h>
 
 // Live DepartureVision status. LIVE_NONE = no live data for this train (e.g.
-// next-morning preview, or the upstream API was unreachable); LIVE_ON_TIME
+// tomorrow's trains, or the upstream API was unreachable); LIVE_ON_TIME
 // covers both "on-time" and "unknown" — tracked, nothing to flag.
 enum LiveState : uint8_t {
   LIVE_NONE = 0,
@@ -18,10 +18,11 @@ enum LiveState : uint8_t {
   LIVE_BOARDING,
 };
 
-// Which board the server chose for the time of day (its `mode` field).
+// Which board the server chose (its `mode` field). The sign asks for
+// direction=outbound, so in practice it only ever gets the first and the last.
 enum BoardMode : uint8_t {
-  MODE_MORNING = 0,   // home -> city, today
-  MODE_EVENING,       // city -> home, tonight
+  MODE_MORNING = 0,   // home -> city, today's remaining trains
+  MODE_EVENING,       // city -> home (never requested by the sign)
   MODE_NEXT_MORNING,  // home -> city, tomorrow's first trains
 };
 
@@ -41,15 +42,18 @@ enum DriveSource : uint8_t {
                    // minutes — drawn as "~16 min drive"
 };
 
+// Capacity. The sign asks the server for 12 trains per board so it can keep
+// counting down for hours if the network goes away; hold a few more than that.
+static const int MAX_BOARDS = 6;
+static const int MAX_DEPS = 16;
+
 struct DepView {
   time_t leaveEpoch;  // when to leave home (depart - drive - buffer);
-                      // 0 when the server sent none (evening boards, or a
-                      // morning board with no drive estimate)
+                      // 0 when the server sent none (no drive estimate)
   time_t depEpoch;    // train departs origin
   time_t arrEpoch;    // train arrives destination
   uint8_t live;       // LiveState
   int16_t delayMin;   // minutes late when LIVE_DELAYED (0 = unknown)
-  char track[8];      // assigned track, "" until known
 };
 
 struct BoardView {
@@ -57,21 +61,24 @@ struct BoardView {
   char destShort[16];   // "Penn" / "Hoboken"
   int driveMin;         // drive home->origin station, 0 = none
   uint8_t driveSource;  // DriveSource
-  DepView deps[6];      // as many as the API sends (TRAINS_PER_BOARD, now 5)
+  DepView deps[MAX_DEPS];
   int nDeps;
 };
 
 struct BoardData {
-  char headline[48];  // e.g. "To NYC · today"
-  int bufferMin;
+  char headline[48];  // e.g. "To NYC · today" (only used to infer the mode
+                      // from an older server)
   uint8_t mode;          // BoardMode
   bool showLeave;        // the big number counts down to LEAVING THE HOUSE
                          // (false = it counts down to the train departing)
   bool scheduleExpired;  // the server's timetable has run out
   uint8_t liveFeed;      // LiveFeed
-  BoardView boards[6];
+  char alert[200];       // first NJ Transit service alert, "" when none
+  int nAlerts;           // how many alerts the server sent
+  BoardView boards[MAX_BOARDS];
   int nBoards;
   bool ok;           // last fetch parsed successfully
+  time_t serverNow;  // the server's clock in the response (0 = absent)
   time_t fetchedAt;  // wall-clock time of the last good fetch (0 = never):
                      // the device clock, or the server's `now` if the device
                      // clock wasn't set yet

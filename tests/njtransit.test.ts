@@ -16,6 +16,8 @@ import {
   fetchStationBoard,
   matchLiveStatus,
   parseNjtDate,
+  parseStationMessages,
+  stationAlerts,
   toLiveTrain,
 } from "@/lib/njtransit";
 
@@ -99,6 +101,42 @@ describe("matchLiveStatus", () => {
   });
 });
 
+describe("station messages (service alerts)", () => {
+  it("come back as plain text, without markup or duplicates", () => {
+    const msgs = parseStationMessages({
+      STATION_2CHAR: "MR",
+      STATIONMSGS: [
+        { MSG_TYPE: "banner", MSG_TEXT: "<b>M&amp;E trains</b> are subject to&nbsp;20-minute delays   due to signal problems." },
+        { MSG_TEXT: "<b>M&amp;E trains</b> are subject to&nbsp;20-minute delays due to signal problems." },
+        "Elevator at Morristown is out of service.",
+        { MSG_TEXT: "   " },
+      ],
+    });
+    expect(msgs).toEqual([
+      "M&E trains are subject to 20-minute delays due to signal problems.",
+      "Elevator at Morristown is out of service.",
+    ]);
+  });
+  it("are empty when NJ Transit has nothing to say, and bounded when it has a lot", () => {
+    expect(parseStationMessages({ STATION_2CHAR: "MR", STATIONMSGS: [] })).toEqual([]);
+    expect(parseStationMessages({ STATION_2CHAR: "MR" })).toEqual([]);
+    expect(parseStationMessages(null)).toEqual([]);
+    const many = parseStationMessages({ STATIONMSGS: Array.from({ length: 9 }, (_, i) => `Message ${i} ${"x".repeat(400)}`) });
+    expect(many).toHaveLength(3);
+    expect(many[0].length).toBeLessThanOrEqual(240);
+  });
+  it("ride along with the board fetch — no extra call", async () => {
+    const calls = stubFetch((url) =>
+      url.endsWith("/getToken")
+        ? json({ Authenticated: "True", UserToken: "t0" })
+        : json({ ...board(), STATIONMSGS: [{ MSG_TEXT: "Trains are running on a holiday schedule." }] })
+    );
+    await fetchStationBoard("MR", "full");
+    expect(stationAlerts(["MR", "BV"])).toEqual(["Trains are running on a holiday schedule."]);
+    expect(dataCalls(calls)).toBe(1);
+  });
+});
+
 describe("fetchStationBoard — the 5-logins-a-day budget", () => {
   it("logs in once and reuses the answer within its cache window", async () => {
     const calls = stubFetch((url) => (url.endsWith("/getToken") ? json({ Authenticated: "True", UserToken: "t0" }) : json(board())));
@@ -158,8 +196,32 @@ describe("fetchStationBoard — the 5-logins-a-day budget", () => {
     const calls = stubFetch((url) => (url.endsWith("/getToken") ? json({ Authenticated: "True", UserToken: "t0" }) : json(board())));
     await fetchStationBoard("MR");
     _resetForTests(); // a cold start or a new deployment: memory gone, shared cache intact
-    await fetchStationBoard("MR");
+    await fetchStationBoard("BV");
     expect(logins(calls)).toBe(1);
+    expect(dataCalls(calls)).toBe(2);
+  });
+
+  it("shares a freshly fetched board across instances — one upstream call, not one each", async () => {
+    const calls = stubFetch((url) => (url.endsWith("/getToken") ? json({ Authenticated: "True", UserToken: "t0" }) : json(board())));
+    expect(await fetchStationBoard("MR", "full")).toHaveLength(1);
+    for (let i = 0; i < 5; i++) {
+      _resetForTests(); // five more instances, moments later
+      expect(await fetchStationBoard("MR", "full")).toHaveLength(1);
+    }
+    expect(dataCalls(calls)).toBe(1);
+  });
+
+  it("fetches a board again once it is 45 seconds old", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(utc(2026, 12, 2, 12));
+    const calls = stubFetch((url) => (url.endsWith("/getToken") ? json({ Authenticated: "True", UserToken: "t0" }) : json(board())));
+    await fetchStationBoard("MR");
+    vi.setSystemTime(utc(2026, 12, 2, 12) + 30_000);
+    await fetchStationBoard("MR");
+    expect(dataCalls(calls)).toBe(1);
+    vi.setSystemTime(utc(2026, 12, 2, 12) + 50_000);
+    _resetForTests();
+    await fetchStationBoard("MR");
     expect(dataCalls(calls)).toBe(2);
   });
 

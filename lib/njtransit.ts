@@ -354,8 +354,17 @@ const BOARD_TTL_MS = 45_000;
 const FAIL_RETRY_MS = 60_000;
 const STALE_OK_MS = 2 * 60_000;
 
-type BoardEntry = { at: number; trains: LiveTrain[]; failedAt: number };
+type BoardEntry = {
+  at: number;
+  trains: LiveTrain[];
+  messages: string[]; // NJ Transit's station messages (service alerts), plain text
+  failedAt: number;
+};
 const boardCache = new Map<string, BoardEntry>();
+// The same boards, shared by every server instance through the Runtime Cache:
+// however many instances are running, a station is fetched about once per
+// BOARD_TTL_MS in total — a hard ceiling of roughly 1,900 calls a day per board.
+type SharedBoard = { at: number; trains: LiveTrain[]; messages: string[] };
 
 type RawStop = {
   STATION_2CHAR?: string;
@@ -380,6 +389,7 @@ type RawItem = {
 
 type RawStation = {
   STATION_2CHAR?: string;
+  STATIONMSGS?: unknown;
   ITEMS?: RawItem[] | { ITEM?: RawItem[] } | null;
 };
 
@@ -434,6 +444,51 @@ export function parseStationBoard(json: unknown): LiveTrain[] | null {
   return items === null ? null : items.map(toLiveTrain);
 }
 
+const MAX_ALERTS = 3;
+const MAX_ALERT_CHARS = 240;
+
+/**
+ * NJ Transit's messages for a station (service alerts such as "trains are
+ * subject to 20-minute delays"), as plain text. They ride along in the same
+ * response as the board, so they cost no extra calls. Exported for tests.
+ */
+export function parseStationMessages(json: unknown): string[] {
+  const raw = (json as RawStation | null)?.STATIONMSGS;
+  const list: unknown[] = Array.isArray(raw)
+    ? raw
+    : raw && Array.isArray((raw as { STATIONMSG?: unknown[] }).STATIONMSG)
+      ? (raw as { STATIONMSG: unknown[] }).STATIONMSG
+      : [];
+  const out: string[] = [];
+  for (const m of list) {
+    const text =
+      typeof m === "string"
+        ? m
+        : m && typeof m === "object"
+          ? String(
+              (m as Record<string, unknown>).MSG_TEXT ??
+                (m as Record<string, unknown>).MSG_HTML ??
+                (m as Record<string, unknown>).MESSAGE ??
+                ""
+            )
+          : "";
+    const clean = text
+      .replace(/<[^>]*>/g, " ") // markup
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&amp;/gi, "&")
+      .replace(/&#39;|&apos;/gi, "'")
+      .replace(/&quot;/gi, '"')
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!clean || out.includes(clean)) continue;
+    out.push(
+      clean.length > MAX_ALERT_CHARS ? `${clean.slice(0, MAX_ALERT_CHARS - 1).trimEnd()}…` : clean
+    );
+    if (out.length >= MAX_ALERTS) break;
+  }
+  return out;
+}
+
 export type BoardVariant = "full" | "light";
 
 /**
@@ -459,10 +514,18 @@ export async function fetchStationBoard(
     boardCache.set(key, {
       at: hit?.at ?? 0,
       trains: hit?.trains ?? [],
+      messages: hit?.messages ?? [],
       failedAt: nowMs,
     });
     return staleOrNull();
   };
+
+  // Another instance may have fetched this board moments ago.
+  const shared = await storeGet<SharedBoard>(`board:${key}`);
+  if (shared.ok && shared.value && nowMs - shared.value.at < BOARD_TTL_MS) {
+    boardCache.set(key, { ...shared.value, failedAt: 0 });
+    return shared.value.trains;
+  }
 
   for (let i = 0; i < MAX_TOKENS_PER_DAY; i++) {
     const tok = await getToken();
@@ -482,7 +545,9 @@ export async function fetchStationBoard(
 
     const trains = parseStationBoard(res.json);
     if (trains === null) return fail("unrecognized response");
-    boardCache.set(key, { at: nowMs, trains, failedAt: 0 });
+    const messages = parseStationMessages(res.json);
+    boardCache.set(key, { at: nowMs, trains, messages, failedAt: 0 });
+    await storeSet(`board:${key}`, { at: nowMs, trains, messages } satisfies SharedBoard, 90);
     return trains;
   }
   return fail("token rejected");
@@ -502,6 +567,24 @@ export async function fetchStationBoards(
     })
   );
   return out;
+}
+
+/**
+ * Station messages (service alerts) from the boards most recently fetched for
+ * these station codes, de-duplicated. Reads what fetchStationBoard already has;
+ * makes no calls.
+ */
+export function stationAlerts(codes: string[]): string[] {
+  const out: string[] = [];
+  const nowMs = Date.now();
+  for (const code of codes) {
+    for (const variant of ["full", "light"] as const) {
+      const e = boardCache.get(`${variant}:${code}`);
+      if (!e || nowMs - e.at > STALE_OK_MS) continue;
+      for (const m of e.messages) if (!out.includes(m)) out.push(m);
+    }
+  }
+  return out.slice(0, MAX_ALERTS);
 }
 
 // Time-match window: NJT's SCHED_DEP_DATE should agree with GTFS to within a

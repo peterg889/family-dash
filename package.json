@@ -10,7 +10,9 @@
     "build:schedule": "node scripts/build-schedule.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "check:schedule": "node scripts/build-schedule.mjs --check"
+    "check:schedule": "node scripts/build-schedule.mjs --check",
+    "contract:update": "UPDATE_CONTRACT_SAMPLE=1 vitest run tests/contract.test.ts",
+    "health": "node scripts/health-check.mjs"
   },
   "dependencies": {
     "@vercel/functions": "^3.11.3",

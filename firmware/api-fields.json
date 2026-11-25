@@ -1,0 +1,18 @@
+[
+  "now",
+  "mode",
+  "showLeave",
+  "headline",
+  "status.schedule.expired",
+  "status.live",
+  "alerts[].text",
+  "boards[].origin",
+  "boards[].destShort",
+  "boards[].driveMin",
+  "boards[].driveSource",
+  "boards[].departures[].leaveByEpochMs",
+  "boards[].departures[].depEpochMs",
+  "boards[].departures[].arrEpochMs",
+  "boards[].departures[].live.state",
+  "boards[].departures[].live.delayMin"
+]
