@@ -99,13 +99,36 @@ Google and is never in the API response.
 
 ## API contract (`/api/departures`)
 
+Query: `direction=outbound|inbound` pins the direction (default: by time of day);
+`limit=1..16` trains per board (default 5); `device=eink` marks the request as
+the sign checking in. **The sign always asks for
+`?direction=outbound&limit=12&device=eink`** — it is at home and only looked at
+when leaving for the train, so it never shows trains home (owner's decision; so
+is: no transfers, no Morristown→Hoboken, no pickup view).
+
 `mode` (`morning` | `evening` | `next-morning`), `showLeave`, `headline`,
 `status: { schedule: {validThrough, daysLeft, expired}, live: ok|down|off,
 drive: live|earlier|none|off }`, `commute`, and `boards[]` each with
 `driveMin`, `driveSource`, `driveMeasuredAtMs`, `source` and `departures[]` (`depEpochMs`,
 `arrEpochMs`, `leaveByEpochMs`, `train`, `source: live|schedule`, `live`).
-`?now=<epochMs>` overrides the clock for testing; it never touches live data
-and is never cached. Responses are edge-cached for 15 s.
+Also `alerts[]` (`{text}` — NJ Transit's station messages, which arrive with
+the boards at no extra cost) and `status.device.lastSeenMs` (the sign's last
+check-in). `?now=<epochMs>` overrides the clock for testing; it never touches
+live data and is never cached. Responses are edge-cached for 15 s.
+
+**The sign's contract is tested:** `firmware/api-fields.json` lists every field
+the firmware reads; `tests/contract.test.ts` checks the response has them all
+and still matches `tests/fixtures/api-outbound-sample.json`
+(`npm run contract:update` regenerates it); CI runs the firmware's real parser
+and renderer over that sample (`tools/contract/check.sh`).
+
+## Knowing when it breaks
+
+`.github/workflows/health.yml` runs `scripts/health-check.mjs` hourly against
+production and opens one GitHub issue ("Train board needs attention") when
+something is wrong — closing it when it recovers. Station boards are also cached
+in the Runtime Cache (45 s), so NJ Transit calls have a hard ceiling regardless
+of traffic.
 
 ## E-Ink firmware
 
@@ -116,35 +139,44 @@ See `firmware/README.md` for the full board spec, pinout, and gotchas. Key facts
 - GxEPD2 class `GxEPD2_420_GYE042A87`. **GPIO7 = panel power-enable, must be
   HIGH before `display.init()`** or the screen stays blank.
 - **It only draws what the server sends.** `board_api.cpp` fetches
-  `BOARD_API_URL` over HTTPS and parses it (ArduinoJson, filtered) into a temp
-  struct, so a bad response never replaces a good board. `ui.cpp` renders one
-  screen per home station into a 1-bit `GFXcanvas1`: a big "leave in N min" hero
-  + an "up next" list. The up/down toggle (GPIO6/4) switches stations; they also
-  auto-rotate every 30 s with a full refresh (the owner is fine with that).
-  There is no on-device schedule.
-- **What the screen promises** (all covered by preview scenarios):
-  `showLeave` from the server — not the presence of a leave time — decides
-  LEAVE IN vs TRAIN DEPARTS IN, and a missing drive time is called out; a
-  cancelled train is never the hero; trains on a later day read
-  "TOMORROW • LEAVE AT 6:32am"; an earlier (not just-measured) drive time is
-  drawn "~16 min drive".
-  The bottom band reports degraded data: "updated 14 min ago" (>6 min),
-  an inverted "OFFLINE since 9:41a" banner (>30 min), "schedule only — no live
-  status", "timetable out of date". It never shows "no trains" when the real
-  problem is WiFi, the server, or an expired timetable — each has its own screen.
+  `BOARD_API_URL` (`?direction=outbound&limit=12&device=eink`); `board_parse.cpp`
+  — Arduino-free, so the laptop and CI run the very same parser
+  (`tools/contract/check.sh`) — fills a temp struct, so a bad response never
+  replaces a good board. `firmware/api-fields.json` lists every field it reads;
+  keep it in step with the parser.
+- **One combined screen** (`ui.cpp`, 1-bit `GFXcanvas1`): every train to the city
+  from both stations, ordered by when you have to leave the house. A 48 pt
+  countdown ("LEAVE IN 11 min") plus "by 7:16a" for the next catchable train;
+  beyond 90 minutes, on a later day, and all night it shows the clock time
+  instead ("TOMORROW • LEAVE AT 6:08 am"). Below it, five one-line rows:
+  leave-by, station, train → arrival. No track numbers; delay pills only from
+  3 minutes; a cancelled train is struck through and never the hero. Up/down
+  pages through later trains and returns by itself after 60 s. It never shows
+  trains home, transfers, or a pickup view (owner's decisions).
+- **Bottom band**, by priority: OFFLINE banner (>30 min) · "updated N min ago"
+  (>6 min) · NJ Transit alert (long ones step a line a minute) · "schedule only
+  - no live status" · "timetable out of date". WiFi down, server unreachable,
+  expired timetable and "setting the clock" each have their own full screen —
+  it never says "no trains" for a different problem.
+- **Redraws only when the picture changes** (so once a minute by day; the owner
+  is fine with full-refresh flashes). Night is 11 PM–5 AM: no clock in the
+  header, clock times instead of countdowns, fetch every 15 min — the panel
+  normally doesn't refresh at all.
 - **Staying alive unattended** (`main.cpp`, constants in `config.h`): fetch every
   3 min, 30 s after a failure, and at once when WiFi reconnects or the clock is
-  first set; 60 s task watchdog; reboot nightly at 3:30 AM; reboot when the
+  first set; clock taken from the server's `now` if NTP hasn't answered; holds
+  12 trains per board and keeps showing them under the OFFLINE banner for up
+  to 12 h; 60 s task watchdog; reboot nightly at 3:30 AM; reboot when the
   network is wedged for 30 min (at most hourly).
 - Build/flash over USB: `./flash-mac.sh` (needs `firmware/src/wifi_config.h`,
   gitignored — WiFi credentials and `OTA_PASSWORD`). After that, **over WiFi**:
   `./flash-ota.sh` (`family-dash-eink.local`, or pass the IP).
-  `platformio.ini` pins the pioarduino platform (Arduino core 3.3.x).
+  `platformio.ini` pins the platform and library versions.
 - Self-QA: serial commands `screenshot` (→ `./screenshot.sh out.png`), `status`
-  (one JSON line: uptime, RSSI, heap, last fetch, HTTP code), `fetch`, `refresh`,
-  `screen`, `settime <epoch>`. Design without the device:
-  `tools/preview/render.sh` renders `ui.cpp` on the host;
-  `tools/preview/render-all.sh <dir>` renders every scenario (CI runs it).
+  (one JSON line), `fetch`, `refresh`, `settime <epoch>`. Design without the
+  device: `tools/preview/render.sh <scenario>` or `--json <api-response.json>`;
+  `tools/preview/render-all.sh <dir>` renders every scenario (CI runs it and
+  uploads the PNGs).
 
 Architecture mirrors the `waveshare/Clawdmeter` project (firmware/ + flash +
 screenshot QA), adapted to E-Ink + a live-API-driven board.

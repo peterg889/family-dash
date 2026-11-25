@@ -22,11 +22,14 @@ With no configuration at all the board runs on the bundled timetable alone.
 
 ## How it works
 
-- **`app/api/departures/route.ts`** serves the boards as JSON. It picks the
-  view by New York time of day — morning (to the city), evening (heading home),
-  late evening (tomorrow morning) — and reports the health of each data source
-  in a `status` block so the screens can say what's wrong instead of showing a
-  plausible-looking empty board.
+- **`app/api/departures/route.ts`** serves the boards as JSON. By default it
+  picks the view by New York time of day — morning (to the city), evening
+  (heading home), late evening (tomorrow morning). `?direction=outbound` or
+  `inbound` pins the direction instead: the sign at home always asks for trains
+  to the city, and the web page has a switch. `?limit=` asks for more trains per
+  board. The response reports the health of each data source in a `status` block
+  — so the screens can say what's wrong instead of showing a plausible-looking
+  empty board — and passes along NJ Transit's own service alerts.
 - **`lib/board.ts`** builds each board "live first": for as far ahead as NJ
   Transit's live board reaches (its next ~19 trains at the home station,
   usually 4–8 hours) the trains listed are the ones NJ Transit says are running;
@@ -102,11 +105,22 @@ Edit the `ORIGINS` / `DESTINATIONS` maps at the top of
 `npm run build:schedule`, then update the `OUTBOUND` / `INBOUND` board lists in
 `app/api/departures/route.ts` and the station codes in `lib/njtransit.ts`.
 
+## Knowing when it breaks
+
+`.github/workflows/health.yml` looks at the live dashboard every hour during
+the day (`scripts/health-check.mjs`; `npm run health` runs it by hand). If the
+server isn't answering, the timetable is running out, NJ Transit live status or
+Google drive times are gone, no trains are showing, or the E-Ink sign hasn't
+checked in for 45 minutes, it opens one GitHub issue — which GitHub emails to
+you — and closes it again when things are back to normal.
+
 ## Checks
 
 `npm test` covers the timetable logic (including both daylight-saving days), the
 live-board merge against real captured NJ Transit data, the login budget, the
-drive-time schedule and its Google-call budget, and that the API never leaks the
-home address.
+drive-time schedule and its Google-call budget, that the API never leaks the
+home address, and the contract with the sign: every field the firmware reads
+must be in the response, and CI runs the firmware's real parser and renderer
+over a sample of it.
 `.github/workflows/ci.yml` runs them, the type check, the production build, a
 firmware compile, and renders every E-Ink screen state on each push.

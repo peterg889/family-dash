@@ -45,6 +45,8 @@ jobs:
         run: pio run -d firmware
       - name: Render every screen state
         run: bash tools/preview/render-all.sh eink-previews
+      - name: Run the sign's real parser over a sample of the server's response
+        run: bash tools/contract/check.sh tests/fixtures/api-outbound-sample.json eink-previews/_from-server-sample.png
       - uses: actions/upload-artifact@v4
         with:
           name: eink-previews
