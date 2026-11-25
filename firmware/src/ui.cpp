@@ -1,18 +1,22 @@
 // firmware/src/ui.cpp — renders the live family-dash board (board_data.h).
 //
-// One screen per home station (Morristown / Bernardsville). The station name is
-// the screen's identity; the countdown for its next catchable train is the one
-// hero; a short "up next" list sits quietly below; the bottom band is reserved
-// for saying how fresh the data is. Words in a sans face, the clock in a
-// monospace face. 400x300, 1-bit.
+// One combined screen for someone about to leave the house for a train. Every
+// train to the city from both home stations is merged into a single list in the
+// order you'd have to LEAVE for it. The next one you can still catch is the
+// hero — a big countdown and the clock time to leave by — and the ones after it
+// sit below, one line each. The bottom band says how far to trust the screen.
+// 400x300, 1-bit.
 //
-// Two rules this file exists to keep:
+// Rules this file exists to keep:
 //   1. The big number's meaning comes from the server (`showLeave`), never from
 //      whether a leave time happens to be present. "LEAVE IN" = leave the
 //      house; anything else is labelled as the train departing.
 //   2. "No trains" is only ever said when the server, freshly asked, had none.
 //      A missing clock, missing WiFi, an unreachable server, an expired
 //      timetable and an old board each say what they are.
+//   3. Everything ticks on the minute (leave times are floored to the minute),
+//      and a far-off train is shown as a clock time, not a countdown — so the
+//      picture changes at most once a minute, and not at all overnight.
 #include "ui.h"
 
 #include <Fonts/FreeSansBold24pt7b.h>
@@ -23,30 +27,44 @@
 #include <cstdio>
 #include <cstring>
 
+#include "fonts/FreeSansBold48pt7b.h"
+
 static const uint16_t INK = 1;
 static const uint16_t BG = 0;
 
-static const int HEADER_H = 42;
+static const int HEADER_H = 36;
 static const int PAD_L = 14;
 static const int RIGHT = UI_W - 10;  // right text edge
 
 // Vertical rhythm (text baselines).
-static const int Y_SUB = 64;      // "to New York"            16 min drive
-static const int Y_LABEL = 90;    // LEAVE IN
-static const int Y_HERO = 132;    // 12 min
-static const int Y_DETAIL = 158;  // catch the 10:37a, arrive 11:53a
-static const int Y_NEXT = 178;    // -- UP NEXT ------------------
-static const int Y_ITEM = 204;    // first up-next entry (two lines, 18 apart)
-static const int ITEM_PITCH = 42;
-static const int FOOTER_TOP = 278;   // bottom status band
+static const int Y_HEAD = 25;     // TO THE CITY                 7:05 AM
+static const int Y_LABEL = 53;    // LEAVE IN                16 min drive
+static const int Y_HERO = 127;    // 12 min   (48pt digits: 67 px above this)
+static const int Y_SIDE_A = 90;   //                             by 7:17a
+static const int Y_SIDE_B = 118;  //                             [+6 late]
+static const int Y_DETAIL = 152;  // Morristown 7:38a -> Penn 8:54a
+static const int Y_CAP = 172;     // LEAVE BY ----------------------
+static const int Y_ROW = 192;     // first later train
+static const int ROW_PITCH = 20;
+static const int FOOTER_TOP = 278;  // bottom status band
 static const int FOOTER_BASE = 294;
 
-// Live status (delay / boarding / track) is only true for a few minutes; once
-// the board is older than this it's dropped rather than shown as current.
-static const long LIVE_FRESH_SEC = 10 * 60;
+// Row columns, sized for the widest row there can be:
+//   12:57p  Bernardsville  12:12 -> Hoboken 12:29p
+static const int X_STATION = 75;  // after "12:57p" in bold
+static const int X_TRAIN = 184;   // after "Bernardsville"
+static const int X_ARROW = 233;   // after "12:12"; the same on every row
 
-static const char* const STATION_NAME[SCREEN_COUNT] = {"Morristown",
-                                                       "Bernardsville"};
+// A countdown is only shown this close to leaving; further out (and for any
+// later day, and all night) the screen gives the clock time instead.
+static const long COUNTDOWN_MAX_MIN = 90;
+
+// Delays shorter than this aren't worth a badge.
+static const int DELAY_FLAG_MIN = 3;
+
+// Live status (delay / boarding) is only true for a few minutes; once the
+// board is older than this it's dropped rather than shown as current.
+static const long LIVE_FRESH_SEC = 10 * 60;
 
 // --- text helpers -----------------------------------------------------------
 
@@ -72,21 +90,24 @@ static void draw_right(GFXcanvas1& c, const GFXfont* f, int xr, int y,
   draw_left(c, f, xr - text_w(c, f, s), y, color, s);
 }
 
-static void upper(char* dst, size_t n, const char* src) {
-  size_t i = 0;
-  for (; src[i] && i + 1 < n; i++) {
-    char ch = src[i];
-    dst[i] = (ch >= 'a' && ch <= 'z') ? (char)(ch - 32) : ch;
-  }
-  dst[i] = 0;
+// A small right-pointing arrow (the 7-bit fonts have no such glyph), sitting
+// at x-height on the text line whose baseline is `y`. 12 px wide.
+static const int ARROW_W = 12;
+static void draw_arrow(GFXcanvas1& c, int x, int y, uint16_t color) {
+  const int my = y - 5;
+  c.drawFastHLine(x, my, ARROW_W - 3, color);
+  c.fillTriangle(x + ARROW_W - 1, my, x + ARROW_W - 6, my - 4,
+                 x + ARROW_W - 6, my + 4, color);
 }
 
-// Friendly place label ("Penn" / "New York Penn Station" -> "New York").
-static const char* dest_label(const char* place) {
+// Friendly place label ("Penn" / "New York Penn Station" -> short form).
+static const char* station_label(const char* place) {
   return strstr(place, "Penn") ? "New York" : place;
 }
 
-// --- formatting -------------------------------------------------------------
+// --- time -------------------------------------------------------------------
+
+static time_t floor_min(time_t t) { return t - (t % 60); }
 
 static void fmt_clock(time_t t, char* buf, size_t n, bool upperAmPm) {
   struct tm tm;
@@ -99,6 +120,15 @@ static void fmt_clock(time_t t, char* buf, size_t n, bool upperAmPm) {
     snprintf(buf, n, "%d:%02d%c", h, tm.tm_min, tm.tm_hour < 12 ? 'a' : 'p');
 }
 
+// "7:45" — no am/pm, for a time that sits right next to one that has it.
+static void fmt_clock_bare(time_t t, char* buf, size_t n) {
+  struct tm tm;
+  localtime_r(&t, &tm);
+  int h = tm.tm_hour % 12;
+  if (h == 0) h = 12;
+  snprintf(buf, n, "%d:%02d", h, tm.tm_min);
+}
+
 // A number that identifies the local calendar day of `t`.
 static long day_index(time_t t) {
   struct tm tm;
@@ -106,7 +136,20 @@ static long day_index(time_t t) {
   return (long)tm.tm_year * 400 + tm.tm_yday;
 }
 
-// --- station data -----------------------------------------------------------
+bool ui_is_night(time_t now) {
+  struct tm tm;
+  localtime_r(&now, &tm);
+  return tm.tm_hour >= 23 || tm.tm_hour < 5;
+}
+
+static long stale_sec(time_t now) {
+  return ui_is_night(now) ? UI_STALE_SEC_NIGHT : UI_STALE_SEC;
+}
+static long offline_sec(time_t now) {
+  return ui_is_night(now) ? UI_OFFLINE_SEC_NIGHT : UI_OFFLINE_SEC;
+}
+
+// --- the merged train list --------------------------------------------------
 
 static const long CATCH_GRACE = 120;  // seconds — still catchable if just past
 
@@ -116,9 +159,10 @@ static bool counts_leave(const BoardData& data, const DepView& d) {
   return data.showLeave && d.leaveEpoch != 0;
 }
 
-// The instant the countdown tracks.
+// The instant the countdown tracks, floored to the minute (so "leave by 7:17"
+// and "leave in 12 min" always agree, and tick together on the minute).
 static time_t go_epoch(const BoardData& data, const DepView& d) {
-  return counts_leave(data, d) ? d.leaveEpoch : d.depEpoch;
+  return floor_min(counts_leave(data, d) ? d.leaveEpoch : d.depEpoch);
 }
 
 struct DepRef {
@@ -126,111 +170,69 @@ struct DepRef {
   const DepView* d;
 };
 
-static bool belongs(const BoardView& b, const char* station) {
-  return strstr(b.origin, station) || strstr(b.destShort, station);
-}
+static const int MAX_TRAINS = MAX_BOARDS * MAX_DEPS;
 
-// Collect this station's catchable departures across ALL its boards, sort them
-// by departure time, and only then keep the first `cap` — truncating before the
-// sort would let one board's later trains crowd out another board's sooner ones.
-static int collect_station(const BoardData& data, const char* station,
-                           time_t now, DepRef* out, int cap) {
-  DepRef all[36];  // 6 boards x 6 departures
+// Every still-catchable train from every board, in the order you'd have to
+// leave for them. Returns the count.
+static int collect(const BoardData& data, time_t now, DepRef* out) {
   int n = 0;
-  for (int i = 0; i < data.nBoards && i < 6; i++) {
+  for (int i = 0; i < data.nBoards && i < MAX_BOARDS; i++) {
     const BoardView& b = data.boards[i];
-    if (!belongs(b, station)) continue;
-    for (int j = 0; j < b.nDeps && j < 6; j++) {
+    for (int j = 0; j < b.nDeps && j < MAX_DEPS; j++) {
       if (go_epoch(data, b.deps[j]) < now - CATCH_GRACE) continue;
-      all[n++] = {&b, &b.deps[j]};
+      out[n++] = {&b, &b.deps[j]};
     }
   }
-  for (int i = 1; i < n; i++) {  // insertion sort by depEpoch
-    DepRef k = all[i];
+  for (int i = 1; i < n; i++) {  // insertion sort: leave time, then departure
+    DepRef k = out[i];
+    const time_t kg = go_epoch(data, *k.d);
     int j = i - 1;
-    while (j >= 0 && all[j].d->depEpoch > k.d->depEpoch) {
-      all[j + 1] = all[j];
+    while (j >= 0) {
+      const time_t jg = go_epoch(data, *out[j].d);
+      if (jg < kg || (jg == kg && out[j].d->depEpoch <= k.d->depEpoch)) break;
+      out[j + 1] = out[j];
       j--;
     }
-    all[j + 1] = k;
+    out[j + 1] = k;
   }
-  if (n > cap) n = cap;
-  for (int i = 0; i < n; i++) out[i] = all[i];
   return n;
 }
 
-static const BoardView* station_board(const BoardData& data,
-                                      const char* station) {
-  for (int i = 0; i < data.nBoards; i++)
-    if (belongs(data.boards[i], station)) return &data.boards[i];
-  return nullptr;
+// The hero: the first train that is actually running. -1 if all are cancelled.
+static int pick_hero(const DepRef* deps, int n) {
+  for (int i = 0; i < n; i++)
+    if (deps[i].d->live != LIVE_CANCELLED) return i;
+  return -1;
 }
 
 // Live state as it should be shown: a cancellation stays a cancellation, but
-// delays / boarding go stale within minutes and are dropped on an old board.
+// delays / boarding go stale within minutes and are dropped on an old board —
+// and a delay too small to matter isn't flagged at all.
 static uint8_t shown_live(const DepView& d, bool liveFresh) {
   if (d.live == LIVE_CANCELLED) return LIVE_CANCELLED;
-  return liveFresh ? d.live : (uint8_t)LIVE_NONE;
+  if (!liveFresh) return LIVE_NONE;
+  if (d.live == LIVE_DELAYED && d.delayMin > 0 && d.delayMin < DELAY_FLAG_MIN)
+    return LIVE_ON_TIME;
+  return d.live;
 }
 
-// "leave in 22 min" / "departs in 1h03" / "leave at 7:20a" (another day).
-static void fmt_goin(const BoardData& data, const DepView& d, time_t now,
-                     char* buf, size_t n) {
-  const bool leave = counts_leave(data, d);
-  const time_t go = go_epoch(data, d);
-  if (day_index(go) != day_index(now) && go > now) {
-    char clk[12];
-    fmt_clock(go, clk, sizeof(clk), false);
-    snprintf(buf, n, "%s at %s", leave ? "leave" : "departs", clk);
-    return;
-  }
-  const char* verb = leave ? "leave" : "departs";
-  long mins = (long)((go - now) / 60);
-  if (mins <= 0)
-    snprintf(buf, n, "%s now", verb);
-  else if (mins < 60)
-    snprintf(buf, n, "%s in %ld min", verb, mins);
-  else
-    snprintf(buf, n, "%s in %ldh%02ld", verb, mins / 60, mins % 60);
-}
-
-// "to New York" / "from Hoboken" / "" — only when a station's trains don't all
-// share one destination (morning) or one city terminal (evening).
-static void fmt_where(const DepRef& r, bool oneDest, bool oneOrigin, char* buf,
-                      size_t n) {
-  if (!oneDest)
-    snprintf(buf, n, " to %s", dest_label(r.b->destShort));
-  else if (!oneOrigin)
-    snprintf(buf, n, " from %s", dest_label(r.b->origin));
-  else
-    buf[0] = 0;
-}
-
-// "catch the 12:23p, arrive 1:41p" (+ "to <dest>" / "from <origin>").
-static void fmt_detail(const DepRef& r, bool oneDest, bool oneOrigin, char* buf,
-                       size_t n) {
-  char dp[12], ar[12], where[28];
-  fmt_clock(r.d->depEpoch, dp, sizeof(dp), false);
-  fmt_clock(r.d->arrEpoch, ar, sizeof(ar), false);
-  fmt_where(r, oneDest, oneOrigin, where, sizeof(where));
-  snprintf(buf, n, "catch the %s%s, arrive %s", dp, where, ar);
-}
-
-// --- live status ------------------------------------------------------------
-
-// Exception text for a train that needs attention; empty when running normally.
-static void fmt_exception(uint8_t live, int delayMin, char* buf, size_t n) {
+// Exception text for a train that needs attention; empty when running
+// normally. `compact` is the short form used in the rows.
+static void fmt_exception(uint8_t live, int delayMin, bool compact, char* buf,
+                          size_t n) {
   if (live == LIVE_CANCELLED)
     snprintf(buf, n, "CANCELLED");
   else if (live == LIVE_BOARDING)
-    snprintf(buf, n, "ALL ABOARD");
+    snprintf(buf, n, compact ? "BOARDING" : "ALL ABOARD");
   else if (live == LIVE_DELAYED && delayMin > 0)
-    snprintf(buf, n, "+%d late", delayMin);
+    snprintf(buf, n, compact ? "+%d" : "+%d late", delayMin);
   else if (live == LIVE_DELAYED)  // delayed by an unknown amount
-    snprintf(buf, n, "DELAYED");
+    snprintf(buf, n, compact ? "LATE" : "DELAYED");
   else
     buf[0] = 0;
 }
+
+// --- pills ------------------------------------------------------------------
 
 static int pill_w(GFXcanvas1& c, const char* s) {
   return text_w(c, &FreeSansBold9pt7b, s) + 12;
@@ -253,32 +255,25 @@ static void draw_tag(GFXcanvas1& c, int xr, int y, const char* s) {
   draw_left(c, f, xr - w - 6, y, INK, s);
 }
 
-// "Trk 3", right-aligned after the text already on the line — quiet, only when
-// there's clear space for it.
-static void draw_track(GFXcanvas1& c, const char* track, const GFXfont* lineFont,
-                       const char* lineText, int y) {
-  if (!track[0]) return;
-  char buf[14];
-  snprintf(buf, sizeof(buf), "Trk %s", track);
-  const GFXfont* f = &FreeSans9pt7b;
-  int need = PAD_L + text_w(c, lineFont, lineText) + 16 + text_w(c, f, buf);
-  if (need <= RIGHT) draw_right(c, f, RIGHT, y, INK, buf);
-}
-
 // --- shared pieces ----------------------------------------------------------
 
+// The inverted header bar: a title, and on the right the clock with a small
+// "live" mark before it. At night the clock is left out (see ui_is_night).
 static void draw_header(GFXcanvas1& c, const char* title, time_t now,
-                        bool time_valid) {
+                        bool time_valid, bool live) {
   c.fillRect(0, 0, UI_W, HEADER_H, INK);
-  char up[28];
-  upper(up, sizeof(up), title);
-  draw_left(c, &FreeSansBold12pt7b, PAD_L, 28, BG, up);
-  if (time_valid) {
-    char clk[16];
-    fmt_clock(now, clk, sizeof(clk), true);
-    draw_right(c, &FreeMonoBold12pt7b, RIGHT, 27, BG, clk);
-  } else {
-    draw_right(c, &FreeSans9pt7b, RIGHT, 27, BG, "syncing clock");
+  draw_left(c, &FreeSansBold12pt7b, PAD_L, Y_HEAD, BG, title);
+  if (!time_valid) {
+    draw_right(c, &FreeSans9pt7b, RIGHT, Y_HEAD - 1, BG, "syncing clock");
+    return;
+  }
+  if (ui_is_night(now)) return;
+  char clk[16];
+  fmt_clock(now, clk, sizeof(clk), true);
+  draw_right(c, &FreeMonoBold12pt7b, RIGHT, Y_HEAD - 1, BG, clk);
+  if (live) {
+    int x = RIGHT - text_w(c, &FreeMonoBold12pt7b, clk) - 14;
+    c.fillCircle(x, HEADER_H / 2, 4, BG);
   }
 }
 
@@ -311,6 +306,69 @@ static void draw_banner(GFXcanvas1& c, const char* lead) {
   }
 }
 
+// An NJ Transit service alert in the bottom band: a small "!" box, then the
+// text. One line is all there is room for, so a longer alert is wrapped into
+// lines and the band shows one of them, moving to the next each minute — the
+// whole message can be read without the picture changing any more often than
+// the clock already makes it. (At night, when the screen holds still, it stays
+// on the first line.)
+static void draw_alert(GFXcanvas1& c, const char* text, time_t now) {
+  const GFXfont* f = &FreeSans9pt7b;
+  c.fillRoundRect(PAD_L, FOOTER_BASE - 14, 16, 19, 4, INK);
+  draw_left(c, &FreeSansBold9pt7b, PAD_L + 5, FOOTER_BASE, BG, "!");
+  const int x = PAD_L + 22;
+
+  char clean[200];
+  snprintf(clean, sizeof(clean), "%s", text);
+  for (char* p = clean; *p; p++)  // the fonts are 7-bit; anything else -> space
+    if ((unsigned char)*p < 32 || (unsigned char)*p > 126) *p = ' ';
+  if (text_w(c, f, clean) <= RIGHT - x) {
+    draw_left(c, f, x, FOOTER_BASE, INK, clean);
+    return;
+  }
+
+  // Greedy word wrap, leaving room on the right for the "2/3" counter.
+  const int room = RIGHT - x - 34;
+  static const int MAX_LINES = 8;
+  int start[MAX_LINES], count[MAX_LINES], n = 0;
+  const int len = (int)strlen(clean);
+  char tmp[200];
+  int p = 0;
+  while (p < len && clean[p] == ' ') p++;
+  while (p < len && n < MAX_LINES) {
+    int good = p, e = p;
+    while (e < len) {
+      while (e < len && clean[e] == ' ') e++;
+      while (e < len && clean[e] != ' ') e++;
+      snprintf(tmp, sizeof(tmp), "%.*s", e - p, clean + p);
+      if (text_w(c, f, tmp) > room) break;
+      good = e;
+    }
+    if (good == p) {  // one word wider than the line: cut it
+      good = p;
+      while (good < len) {
+        snprintf(tmp, sizeof(tmp), "%.*s", good + 1 - p, clean + p);
+        if (text_w(c, f, tmp) > room) break;
+        good++;
+      }
+      if (good == p) good = p + 1;
+    }
+    start[n] = p;
+    count[n] = good - p;
+    n++;
+    p = good;
+    while (p < len && clean[p] == ' ') p++;
+  }
+  if (n == 0) return;
+
+  const int i = ui_is_night(now) ? 0 : (int)((now / 60) % n);
+  snprintf(tmp, sizeof(tmp), "%.*s", count[i], clean + start[i]);
+  draw_left(c, f, x, FOOTER_BASE, INK, tmp);
+  char ctr[12];
+  snprintf(ctr, sizeof(ctr), "%d/%d", i + 1, n);
+  draw_right(c, &FreeSansBold9pt7b, RIGHT, FOOTER_BASE, INK, ctr);
+}
+
 // "9:41a", or "Tue 9:41a" when that wasn't today.
 static void fmt_since(time_t t, time_t now, char* buf, size_t n) {
   char clk[12];
@@ -331,195 +389,263 @@ static long board_age(const BoardData& data, time_t now) {
   return age < 0 ? 0 : age;
 }
 
-// --- station screen ---------------------------------------------------------
+// --- the hero ---------------------------------------------------------------
 
-// The sub-line under the header: where the trains go / come from on the left,
-// and — on a leave-the-house board — the drive time on the right. A missing
-// drive time is called out, because it changes what the big number means.
-static void draw_subline(GFXcanvas1& c, const BoardData& data,
-                         const char* station, const DepRef* deps, int n) {
-  const bool evening = data.mode == MODE_EVENING;
-  char sub[48];
-  sub[0] = 0;
-  for (int i = 0; i < n; i++) {
-    const char* dl =
-        dest_label(evening ? deps[i].b->origin : deps[i].b->destShort);
-    if (sub[0] && strstr(sub, dl)) continue;  // skip a place already listed
-    size_t l = strlen(sub);
-    snprintf(sub + l, sizeof(sub) - l, "%s%s",
-             l ? " & " : (evening ? "from " : "to "), dl);
+// "Morristown 7:38a -> Penn 8:54a". WHICH station to drive to is the one thing
+// on this line that must not be misread, so its name is set larger than the
+// times — unless the line would then run off the screen.
+static void draw_route(GFXcanvas1& c, int x, int y, const DepRef& r) {
+  const GFXfont* f = &FreeSansBold9pt7b;
+  const char* station = station_label(r.b->origin);
+  char dp[12], tail[40];
+  fmt_clock(r.d->depEpoch, dp, sizeof(dp), false);
+  {
+    char ar[12];
+    fmt_clock(r.d->arrEpoch, ar, sizeof(ar), false);
+    snprintf(tail, sizeof(tail), "%s %s", r.b->destShort, ar);
   }
-  draw_left(c, &FreeSans9pt7b, PAD_L, Y_SUB, INK, sub);
+  const int rest = 7 + text_w(c, f, dp) + 5 + ARROW_W + 5 + text_w(c, f, tail);
+  const GFXfont* sf = &FreeSansBold12pt7b;
+  if (x + text_w(c, sf, station) + rest > RIGHT) sf = f;
 
-  if (!data.showLeave) return;
-  const BoardView* b = station_board(data, station);
-  if (b && b->driveMin > 0) {
-    char txt[24];
-    snprintf(txt, sizeof(txt), "%s%d min drive",
-             b->driveSource == DRIVE_EARLIER ? "~" : "", b->driveMin);
-    draw_right(c, &FreeSans9pt7b, RIGHT, Y_SUB, INK, txt);
-  } else if (b) {
-    draw_tag(c, RIGHT, Y_SUB, "no drive time");
-  }
+  draw_left(c, sf, x, y, INK, station);
+  x += text_w(c, sf, station) + 7;
+  draw_left(c, f, x, y, INK, dp);
+  x += text_w(c, f, dp) + 5;
+  draw_arrow(c, x, y, INK);
+  x += ARROW_W + 5;
+  draw_left(c, f, x, y, INK, tail);
 }
 
-static void draw_trains(GFXcanvas1& c, const BoardData& data, time_t now,
-                        const char* station, const DepRef* deps, int n,
-                        bool liveFresh) {
-  draw_subline(c, data, station, deps, n);
+// The top half: label, the big number, the time to leave by, and the train.
+static void draw_hero(GFXcanvas1& c, const BoardData& data, time_t now,
+                      const DepRef* deps, int n, int hero, bool liveFresh) {
+  const GFXfont* big = &FreeSansBold48pt7b;
 
-  // Are all this station's trains headed to / coming from the same place?
-  bool oneDest = true, oneOrigin = true;
-  for (int i = 1; i < n; i++) {
-    if (strcmp(deps[i].b->destShort, deps[0].b->destShort) != 0) oneDest = false;
-    if (strcmp(deps[i].b->origin, deps[0].b->origin) != 0) oneOrigin = false;
+  if (hero < 0) {
+    // Every train we hold is cancelled.
+    const DepRef& r = deps[0];
+    draw_left(c, &FreeSans9pt7b, PAD_L, Y_LABEL, INK, "NEXT TRAIN");
+    draw_left(c, &FreeSansBold24pt7b, PAD_L, Y_HERO - 12, INK, "cancelled");
+    char line[64], dp[12];
+    fmt_clock(r.d->depEpoch, dp, sizeof(dp), false);
+    snprintf(line, sizeof(line), "the %s from %s is not running", dp,
+             station_label(r.b->origin));
+    draw_left(c, &FreeSansBold9pt7b, PAD_L, Y_DETAIL, INK, line);
+    return;
   }
 
-  // The hero is the next train that is actually running: cancelled trains
-  // ahead of it are named beside the label so it's clear why it isn't first.
-  int hero = 0;
-  while (hero < n && deps[hero].d->live == LIVE_CANCELLED) hero++;
-  const bool allCancelled = hero == n;
-  if (allCancelled) hero = 0;
-
-  const DepView& h = *deps[hero].d;
+  const DepRef& r = deps[hero];
+  const DepView& h = *r.d;
   const bool leave = counts_leave(data, h);
   const time_t go = go_epoch(data, h);
+  const time_t nowMin = floor_min(now);
+  const long mins = (long)((go - nowMin) / 60);
   const bool otherDay = day_index(go) != day_index(now) && go > now;
-  const long mins = (long)((go - now) / 60);
-  const bool due = mins <= 0;  // inside the last minute counts as "now"
+  // A countdown ticks every minute, so it is kept for when it is useful: the
+  // last hour and a half before leaving, and never at night, when the screen
+  // is meant to hold still.
+  const bool asClock =
+      otherDay || mins > COUNTDOWN_MAX_MIN || ui_is_night(now);
+  const bool due = mins <= 0 && !asClock;
 
-  // --- label row -----------------------------------------------------------
-  int labelEnd = PAD_L;
-  if (allCancelled) {
-    draw_left(c, &FreeSans9pt7b, PAD_L, Y_LABEL, INK, "NEXT TRAIN");
-    labelEnd += text_w(c, &FreeSans9pt7b, "NEXT TRAIN");
-  } else if (otherDay) {
+  // --- label row: what the number means; the drive on the right -------------
+  if (otherDay) {
     // TOMORROW (dot) LEAVE AT — the day is the loudest word on the row.
     const char* what = leave ? "LEAVE AT" : "TRAIN DEPARTS AT";
     draw_left(c, &FreeSansBold9pt7b, PAD_L, Y_LABEL, INK, "TOMORROW");
     int x = PAD_L + text_w(c, &FreeSansBold9pt7b, "TOMORROW") + 9;
     c.fillCircle(x, Y_LABEL - 5, 2, INK);
-    x += 9;
-    draw_left(c, &FreeSans9pt7b, x, Y_LABEL, INK, what);
-    labelEnd = x + text_w(c, &FreeSans9pt7b, what);
+    draw_left(c, &FreeSans9pt7b, x + 9, Y_LABEL, INK, what);
   } else {
     const char* label;
-    if (leave) label = due ? "TIME TO GO" : "LEAVE IN";
-    else if (data.showLeave) label = due ? "TRAIN DEPARTING" : "TRAIN DEPARTS IN";
-    else label = due ? "DEPARTING" : "DEPARTS IN";
+    if (leave) label = due ? "TIME TO GO" : (asClock ? "LEAVE AT" : "LEAVE IN");
+    else if (data.showLeave)
+      label = due ? "TRAIN DEPARTING"
+                  : (asClock ? "TRAIN DEPARTS AT" : "TRAIN DEPARTS IN");
+    else label = due ? "DEPARTING" : (asClock ? "DEPARTS AT" : "DEPARTS IN");
     draw_left(c, &FreeSans9pt7b, PAD_L, Y_LABEL, INK, label);
-    labelEnd += text_w(c, &FreeSans9pt7b, label);
   }
-  if (!allCancelled && hero > 0) {
-    char skipped[28];
-    if (hero == 1) {
-      char clk[12];
-      fmt_clock(deps[0].d->depEpoch, clk, sizeof(clk), false);
-      snprintf(skipped, sizeof(skipped), "%s CANCELLED", clk);
-    } else {
-      snprintf(skipped, sizeof(skipped), "%d trains CANCELLED", hero);
+  if (data.showLeave) {
+    if (leave && r.b->driveMin > 0) {
+      char txt[24];
+      snprintf(txt, sizeof(txt), "%s%d min drive",
+               r.b->driveSource == DRIVE_EARLIER ? "~" : "", r.b->driveMin);
+      draw_right(c, &FreeSans9pt7b, RIGHT, Y_LABEL, INK, txt);
+    } else if (!leave) {
+      // Called out, because it changes what the big number means.
+      draw_tag(c, RIGHT, Y_LABEL, "no drive time");
     }
-    if (labelEnd + 16 + pill_w(c, skipped) <= RIGHT)
-      draw_pill(c, RIGHT, Y_LABEL, skipped);
-    else if (labelEnd + 16 + pill_w(c, "CANCELLED") <= RIGHT)
-      draw_pill(c, RIGHT, Y_LABEL, "CANCELLED");
   }
 
-  // --- hero ----------------------------------------------------------------
-  char line[96];
-  if (allCancelled) {
-    draw_left(c, &FreeSansBold24pt7b, PAD_L, Y_HERO, INK, "cancelled");
-    char dp[12], where[28];
-    fmt_clock(h.depEpoch, dp, sizeof(dp), false);
-    fmt_where(deps[hero], oneDest, oneOrigin, where, sizeof(where));
-    snprintf(line, sizeof(line), "the %s%s is not running", dp, where);
-    draw_left(c, &FreeSans9pt7b, PAD_L, Y_DETAIL, INK, line);
+  // --- the big number ---------------------------------------------------------
+  char badge[16];
+  fmt_exception(shown_live(h, liveFresh), h.delayMin, false, badge,
+                sizeof(badge));
+
+  if (asClock) {
+    char clk[12];
+    struct tm tm;
+    localtime_r(&go, &tm);
+    int hr = tm.tm_hour % 12;
+    if (hr == 0) hr = 12;
+    snprintf(clk, sizeof(clk), "%d:%02d", hr, tm.tm_min);
+    draw_left(c, big, PAD_L - 2, Y_HERO, INK, clk);
+    int nx = PAD_L - 2 + text_w(c, big, clk) + 8;
+    draw_left(c, &FreeSansBold12pt7b, nx, Y_HERO, INK,
+              tm.tm_hour < 12 ? "am" : "pm");
+    if (badge[0]) draw_pill(c, RIGHT, Y_SIDE_A, badge);
   } else {
-    if (otherDay) {
-      char clk[12];
-      struct tm tm;
-      localtime_r(&go, &tm);
-      int hr = tm.tm_hour % 12;
-      if (hr == 0) hr = 12;
-      snprintf(clk, sizeof(clk), "%d:%02d", hr, tm.tm_min);
-      draw_left(c, &FreeSansBold24pt7b, PAD_L, Y_HERO, INK, clk);
-      int nx = PAD_L + text_w(c, &FreeSansBold24pt7b, clk) + 8;
-      draw_left(c, &FreeSansBold12pt7b, nx, Y_HERO, INK,
-                tm.tm_hour < 12 ? "am" : "pm");
-    } else if (due) {
-      draw_left(c, &FreeSansBold24pt7b, PAD_L, Y_HERO, INK, "now");
-    } else if (mins < 60) {
+    if (due) {
+      draw_left(c, big, PAD_L - 2, Y_HERO, INK, "now");
+    } else {
       char num[8];
       snprintf(num, sizeof(num), "%ld", mins);
-      draw_left(c, &FreeSansBold24pt7b, PAD_L, Y_HERO, INK, num);
-      int nx = PAD_L + text_w(c, &FreeSansBold24pt7b, num) + 10;
+      draw_left(c, big, PAD_L - 2, Y_HERO, INK, num);
+      int nx = PAD_L - 2 + text_w(c, big, num) + 10;
       draw_left(c, &FreeSansBold12pt7b, nx, Y_HERO, INK, "min");
-    } else {
-      char big[12];
-      snprintf(big, sizeof(big), "%ldh%02ld", mins / 60, mins % 60);
-      draw_left(c, &FreeSansBold24pt7b, PAD_L, Y_HERO, INK, big);
     }
-    // Live status: exception pill beside the big number; track on the detail
-    // line. The countdown stays on scheduled time — the pill is the alert.
-    char badge[16];
-    fmt_exception(shown_live(h, liveFresh), h.delayMin, badge, sizeof(badge));
-    if (badge[0]) draw_pill(c, RIGHT, Y_HERO - 8, badge);
-
-    fmt_detail(deps[hero], oneDest, oneOrigin, line, sizeof(line));
-    draw_left(c, &FreeSans9pt7b, PAD_L, Y_DETAIL, INK, line);
-    if (liveFresh) draw_track(c, h.track, &FreeSans9pt7b, line, Y_DETAIL);
+    if (leave) {
+      // The clock time to be out of the door by.
+      char by[20], clk[12];
+      fmt_clock(go, clk, sizeof(clk), false);
+      snprintf(by, sizeof(by), "by %s", clk);
+      draw_right(c, &FreeSansBold12pt7b, RIGHT, Y_SIDE_A, INK, by);
+      if (badge[0]) draw_pill(c, RIGHT, Y_SIDE_B, badge);
+    } else if (badge[0]) {
+      draw_pill(c, RIGHT, Y_SIDE_A, badge);
+    }
   }
 
-  // --- up next: same phrasing, quieter ---------------------------------------
-  if (hero + 1 >= n) return;
-  {
-    const char* lbl = "UP NEXT";
-    draw_left(c, &FreeSans9pt7b, PAD_L, Y_NEXT + 5, INK, lbl);
-    int lx = PAD_L + text_w(c, &FreeSans9pt7b, lbl) + 8;
-    c.drawFastHLine(lx, Y_NEXT, UI_W - PAD_L - lx, INK);
+  // --- which train that is ------------------------------------------------------
+  draw_route(c, PAD_L, Y_DETAIL, r);
+}
+
+// --- the rows ---------------------------------------------------------------
+
+// One later train on one line:
+//   7:20a  Bernardsville  7:45 -> Hoboken 8:28a
+// The first column is the clock time to leave by (or, with no drive time, the
+// departure). The train's own time follows without am/pm — it is minutes after
+// the time beside it. An exception replaces the arrival time with a compact
+// pill; a cancelled train is struck through.
+static void draw_row(GFXcanvas1& c, const BoardData& data, const DepRef& r,
+                     int y, bool liveFresh) {
+  const GFXfont* f = &FreeSans9pt7b;
+  const DepView& d = *r.d;
+  const uint8_t live = shown_live(d, liveFresh);
+  const bool leave = counts_leave(data, d);
+
+  char lead[12], dp[12], ar[12], badge[16];
+  fmt_clock(go_epoch(data, d), lead, sizeof(lead), false);
+  fmt_clock_bare(d.depEpoch, dp, sizeof(dp));
+  fmt_clock(d.arrEpoch, ar, sizeof(ar), false);
+  fmt_exception(live, d.delayMin, true, badge, sizeof(badge));
+
+  const char* station = station_label(r.b->origin);
+  draw_left(c, &FreeSansBold9pt7b, PAD_L, y, INK, lead);
+  draw_left(c, f, X_STATION, y, INK, station);
+
+  if (live == LIVE_CANCELLED) {
+    // No destination or arrival for a train that isn't running: the struck
+    // times and the pill say all there is to say.
+    draw_left(c, f, X_TRAIN, y, INK, dp);
+    const int end = X_TRAIN + text_w(c, f, dp);
+    c.drawFastHLine(PAD_L - 2, y - 5, end + 2 - (PAD_L - 2), INK);
+    c.drawFastHLine(PAD_L - 2, y - 4, end + 2 - (PAD_L - 2), INK);
+    draw_pill(c, RIGHT, y, badge);
+    return;
   }
-  int y = Y_ITEM;
-  for (int i = hero + 1, shown = 0; i < n && shown < 2; i++, shown++) {
-    const DepView& d = *deps[i].d;
-    const uint8_t live = shown_live(d, liveFresh);
-    char head[40], badge[16];
-    if (live == LIVE_CANCELLED) {
-      // No "leave in" for a train that isn't running.
-      char dp[12], where[28];
-      fmt_clock(d.depEpoch, dp, sizeof(dp), false);
-      fmt_where(deps[i], oneDest, oneOrigin, where, sizeof(where));
-      snprintf(head, sizeof(head), "the %s%s", dp, where);
-      snprintf(line, sizeof(line), "not running");
-    } else {
-      fmt_goin(data, d, now, head, sizeof(head));
-      fmt_detail(deps[i], oneDest, oneOrigin, line, sizeof(line));
-    }
-    draw_left(c, &FreeSansBold9pt7b, PAD_L, y, INK, head);
-    fmt_exception(live, d.delayMin, badge, sizeof(badge));
-    if (badge[0]) draw_pill(c, RIGHT, y - 2, badge);
-    draw_left(c, &FreeSans9pt7b, PAD_L, y + 18, INK, line);
-    if (liveFresh && live != LIVE_CANCELLED)
-      draw_track(c, d.track, &FreeSans9pt7b, line, y + 18);
-    y += ITEM_PITCH;
+
+  // With a leave time in the first column, the train's own time goes here;
+  // without one the first column already is the train's time.
+  if (leave) draw_left(c, f, X_TRAIN, y, INK, dp);
+
+  // Right-hand end: "Hoboken 8:28a", or the destination and a pill.
+  char tail[32];
+  int tailRight = RIGHT;
+  if (badge[0]) {
+    draw_pill(c, RIGHT, y, badge);
+    tailRight = RIGHT - pill_w(c, badge) - 8;
+    snprintf(tail, sizeof(tail), "%s", r.b->destShort);
+  } else {
+    snprintf(tail, sizeof(tail), "%s %s", r.b->destShort, ar);
+  }
+  const int tailLeft = tailRight - text_w(c, f, tail);
+  if (tailLeft >= X_ARROW + ARROW_W + 4) {
+    draw_arrow(c, X_ARROW, y, INK);
+    draw_left(c, f, tailLeft, y, INK, tail);
+  }
+  // (Otherwise there's no room for the destination next to this pill — the
+  // pill matters more.)
+}
+
+static int page_count_for(int n, int hero) {
+  const int rows = n - (hero >= 0 ? 1 : (n > 0 ? 1 : 0));
+  return rows <= UI_ROWS ? 1 : (rows + UI_ROWS - 1) / UI_ROWS;
+}
+
+static void draw_rows(GFXcanvas1& c, const BoardData& data, const DepRef* deps,
+                      int n, int hero, int page, bool liveFresh) {
+  // Everything except the train shown big, in order. (Cancelled trains ahead of
+  // the hero stay in the list, so it's clear why they aren't the big one.)
+  static DepRef rows[MAX_TRAINS];
+  int nr = 0;
+  const int skip = hero >= 0 ? hero : 0;
+  for (int i = 0; i < n; i++)
+    if (i != skip) rows[nr++] = deps[i];
+  if (nr == 0) return;
+
+  const int pages = page_count_for(n, hero);
+  if (page >= pages) page = pages - 1;
+  if (page < 0) page = 0;
+
+  // Caption over the first column, a rule, and the page mark when paged.
+  bool anyLeave = false;
+  for (int i = 0; i < nr; i++)
+    if (counts_leave(data, *rows[i].d)) anyLeave = true;
+  const char* cap = anyLeave ? "LEAVE BY" : "DEPARTS";
+  draw_left(c, &FreeSans9pt7b, PAD_L, Y_CAP, INK, cap);
+  int lx = PAD_L + text_w(c, &FreeSans9pt7b, cap) + 8;
+  int rx = RIGHT;
+  if (page > 0) {
+    char pg[24];
+    snprintf(pg, sizeof(pg), "later %d/%d", page + 1, pages);
+    draw_pill(c, RIGHT, Y_CAP, pg);
+    rx = RIGHT - pill_w(c, pg) - 8;
+  }
+  c.drawFastHLine(lx, Y_CAP - 5, rx - lx, INK);
+
+  int y = Y_ROW;
+  for (int i = page * UI_ROWS; i < nr && i < (page + 1) * UI_ROWS; i++) {
+    draw_row(c, data, rows[i], y, liveFresh);
+    y += ROW_PITCH;
   }
 }
 
-// The server, freshly asked, has no trains for this station. Say so in the
-// words of the board it sent — never "today" on tomorrow's board.
+// The server, freshly asked, has no trains. Say so in the words of the board it
+// sent — never "today" on tomorrow's board.
 static void draw_no_trains(GFXcanvas1& c, const BoardData& data) {
   switch (data.mode) {
     case MODE_EVENING:
       draw_message(c, "No more direct trains tonight",
-                   "No further arrivals on tonight's schedule.", "");
+                   "Nothing further on tonight's schedule.", "");
       break;
     case MODE_NEXT_MORNING:
-      draw_message(c, "No direct trains tomorrow",
-                   "Nothing from here on tomorrow's schedule.", "");
+      draw_message(c, "No direct trains tomorrow morning",
+                   "Nothing to the city on tomorrow's schedule.", "");
       break;
     default:
       draw_message(c, "No more direct trains today",
-                   "Nothing further from here on today's schedule.", "");
+                   "Nothing further to the city on today's schedule.", "");
+  }
+}
+
+static const char* title_for(const BoardData& data) {
+  switch (data.mode) {
+    case MODE_EVENING: return "HEADING HOME";
+    case MODE_NEXT_MORNING: return "TOMORROW";  // (longer would hit the clock)
+    default: return "TO THE CITY";
   }
 }
 
@@ -528,7 +654,18 @@ static void draw_no_trains(GFXcanvas1& c, const BoardData& data) {
 bool ui_degraded(const BoardData& data, time_t now, bool time_valid) {
   if (data.fetchedAt == 0 || data.nBoards == 0 || data.scheduleExpired)
     return true;
-  return time_valid && board_age(data, now) > UI_STALE_SEC;
+  return time_valid && board_age(data, now) > stale_sec(now);
+}
+
+int ui_train_count(const BoardData& data, time_t now) {
+  static DepRef deps[MAX_TRAINS];
+  return collect(data, now, deps);
+}
+
+int ui_page_count(const BoardData& data, time_t now) {
+  static DepRef deps[MAX_TRAINS];
+  const int n = collect(data, now, deps);
+  return page_count_for(n, pick_hero(deps, n));
 }
 
 void ui_draw_notice(GFXcanvas1& canvas, const char* title, const char* line1,
@@ -536,21 +673,19 @@ void ui_draw_notice(GFXcanvas1& canvas, const char* title, const char* line1,
   canvas.fillScreen(BG);
   canvas.setTextWrap(false);
   canvas.fillRect(0, 0, UI_W, HEADER_H, INK);
-  draw_left(canvas, &FreeSansBold12pt7b, PAD_L, 28, BG, "FAMILY DASHBOARD");
+  draw_left(canvas, &FreeSansBold12pt7b, PAD_L, Y_HEAD, BG, "FAMILY DASHBOARD");
   draw_message(canvas, title, line1, line2);
 }
 
 void ui_draw(GFXcanvas1& canvas, const BoardData& data, time_t now,
-             net_state_t net, bool time_valid, UiScreen screen) {
+             net_state_t net, bool time_valid, int page) {
   canvas.fillScreen(BG);
   canvas.setTextWrap(false);  // clip, never spill onto the next line
-  const char* station =
-      STATION_NAME[screen == SCREEN_BERNARDSVILLE ? 1 : 0];
   const bool wifiUp = net == NET_CONNECTED;
 
   // 1. No clock: every countdown would be wrong, so show none.
   if (!time_valid) {
-    draw_header(canvas, station, now, false);
+    draw_header(canvas, "FAMILY DASHBOARD", now, false, false);
     draw_message(canvas, "Setting the clock",
                  wifiUp ? "Syncing the time over WiFi..."
                         : "Waiting for WiFi to set the time...",
@@ -560,7 +695,7 @@ void ui_draw(GFXcanvas1& canvas, const BoardData& data, time_t now,
 
   // 2. Never had a board: say which link in the chain is missing.
   if (data.fetchedAt == 0) {
-    draw_header(canvas, "Family dashboard", now, true);
+    draw_header(canvas, "FAMILY DASHBOARD", now, true, false);
     if (!wifiUp) {
       draw_message(canvas, "No WiFi", "Can't join the WiFi network.",
                    "Retrying every 10 seconds.");
@@ -580,19 +715,25 @@ void ui_draw(GFXcanvas1& canvas, const BoardData& data, time_t now,
     return;
   }
 
-  draw_header(canvas, station, now, true);
-
+  const bool night = ui_is_night(now);
   const long age = board_age(data, now);
-  const bool offline = age > UI_OFFLINE_SEC;
-  const bool liveFresh = age <= LIVE_FRESH_SEC;
+  const bool offline = age > offline_sec(now);
+  const bool stale = age > stale_sec(now);
+  // By day the board is refetched every 3 min, so anything older than a few
+  // minutes means trouble; at night it is fetched less often on purpose.
+  const bool liveFresh = age <= (night ? UI_STALE_SEC_NIGHT : LIVE_FRESH_SEC);
   char since[20];
   fmt_since(data.fetchedAt, now, since, sizeof(since));
 
-  DepRef deps[6];
-  const int n = collect_station(data, station, now, deps, 6);
+  static DepRef deps[MAX_TRAINS];
+  const int n = collect(data, now, deps);
+  const int hero = pick_hero(deps, n);
+
+  draw_header(canvas, title_for(data), now, true,
+              data.liveFeed == FEED_OK && !stale);
 
   // 3. Long out of touch: an old board with nothing left on it (or one from
-  //    hours ago) is not "no trains" — it's "we don't know".
+  //    half a day ago) is not "no trains" — it's "we don't know".
   if (offline && (n == 0 || age > UI_OFFLINE_HIDE_SEC)) {
     char title[40];
     snprintf(title, sizeof(title), "Offline since %s", since);
@@ -611,22 +752,26 @@ void ui_draw(GFXcanvas1& canvas, const BoardData& data, time_t now,
   } else if (n == 0) {
     draw_no_trains(canvas, data);
   } else {
-    draw_trains(canvas, data, now, station, deps, n, liveFresh);
+    draw_hero(canvas, data, now, deps, n, hero, liveFresh);
+    draw_rows(canvas, data, deps, n, hero, page, liveFresh);
   }
 
-  // 5. Bottom band: how much to trust what's above.
+  // 5. Bottom band: how much to trust what's above, then anything NJ Transit
+  //    wants riders to know.
   char foot[64];
   if (offline) {
     snprintf(foot, sizeof(foot), "OFFLINE since %s", since);
     draw_banner(canvas, foot);
-  } else if (age > UI_STALE_SEC) {
+  } else if (stale) {
     snprintf(foot, sizeof(foot), "%supdated %ld min ago, retrying",
              wifiUp ? "" : "WiFi down - ", age / 60);
     draw_footer(canvas, foot);
-  } else if (data.scheduleExpired && n > 0) {
-    draw_footer(canvas, "timetable out of date - live trains only");
+  } else if (data.alert[0]) {
+    draw_alert(canvas, data.alert, now);
   } else if (data.liveFeed == FEED_DOWN && data.mode != MODE_NEXT_MORNING &&
              n > 0) {
     draw_footer(canvas, "schedule only - no live status");
+  } else if (data.scheduleExpired && n > 0) {
+    draw_footer(canvas, "timetable out of date - live trains only");
   }
 }

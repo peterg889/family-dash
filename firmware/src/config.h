@@ -13,16 +13,29 @@
 
 // Live family-dash board (departures, live NJ Transit status and "leave by"
 // times, all computed server-side). The device fetches and renders this.
-#define BOARD_API_URL "https://family-dash-beta.vercel.app/api/departures"
+//   direction=outbound  the sign is for leaving the house: only ever trains to
+//                       the city (today's, then from 8 PM tomorrow morning's)
+//   limit=12            enough trains per board to keep counting down for hours
+//                       if the network goes away
+//   device=eink         lets the server note when the sign last checked in
+#define BOARD_API_URL \
+  "https://family-dash-beta.vercel.app/api/departures" \
+  "?direction=outbound&limit=12&device=eink"
 
-// How often to swap between the two station screens (Morristown /
-// Bernardsville). Each swap is a full refresh, which also re-ticks the
-// countdowns from the local clock.
-#define ROTATE_INTERVAL_MS 30000UL  // 30 s per screen
+// The screen is re-rendered into memory this often (cheap) and pushed to the
+// panel only when the picture actually changed — in practice once a minute by
+// day (the clock and the countdown tick together) and hardly at all at night.
+#define RENDER_INTERVAL_MS 5000UL
+
+// After paging to later trains with the up/down toggle, go back to the next
+// trains by itself.
+#define PAGE_RETURN_MS 60000UL
 
 // How often to refetch the board after a GOOD fetch. Kept well above the
 // render cadence: departures change slowly and the server caches upstream calls.
 #define FETCH_INTERVAL_MS 180000UL  // 3 min
+// ...and at night (11 PM - 5 AM, see ui_is_night) when nobody is leaving.
+#define FETCH_INTERVAL_NIGHT_MS 900000UL  // 15 min
 
 // How soon to try again after a FAILED fetch. (A fetch is also made at once
 // whenever WiFi reconnects or the clock is first set.)

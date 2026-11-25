@@ -1,20 +1,25 @@
 // firmware/src/main.cpp — Family Dashboard on the CrowPanel 4.2" E-Paper.
 //
-// Fetches the live family-dash board over WiFi (/api/departures — departures,
-// live NJ Transit status and "leave by" times, all computed server-side) and
-// renders it on the 400x300 panel, one screen per home station. WiFi also sets
+// Fetches the live family-dash board over WiFi (/api/departures — trains to the
+// city, live NJ Transit status and "leave by" times, all computed server-side)
+// and renders it as one combined screen on the 400x300 panel. WiFi also sets
 // the clock via NTP (for the countdowns between fetches) and carries
 // over-the-air firmware updates.
 //
 // The loop is built to keep itself honest and alive unattended:
 //   - a fetch is made at once when WiFi (re)connects or the clock is first set,
-//     every 3 min after a good fetch, and 30 s after a failed one;
+//     every 3 min after a good fetch (15 min at night), and 30 s after a failed
+//     one;
+//   - the screen is re-rendered into memory every few seconds and on the minute,
+//     but pushed to the panel only when the picture actually changed — once a
+//     minute by day, hardly at all overnight;
 //   - the UI is told how old the board is and why, so it never shows a stale or
-//     missing board as "no trains" (see ui.cpp);
+//     missing board as "no trains" (see ui.cpp); up to 12 trains per board are
+//     held, so the countdowns carry on for hours if the network goes away;
 //   - a task watchdog, a nightly reboot and a stuck-network reboot recover from
 //     hangs without anyone unplugging it.
 //
-// Serial commands (115200 baud): screenshot / refresh / screen / fetch /
+// Serial commands (115200 baud): screenshot / refresh / page [n] / fetch /
 // status / settime <epoch> — see firmware/README.md.
 #include <Arduino.h>
 #include <SPI.h>
@@ -39,12 +44,23 @@ EinkDisplay display(GxEPD2_420_GYE042A87(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY));
 static GFXcanvas1 canvas(UI_W, UI_H);
 static const size_t CANVAS_BYTES = ((UI_W + 7) / 8) * UI_H;  // 50 * 300 = 15000
 
+// What the panel is showing right now, to tell whether a fresh render differs.
+static uint8_t pushed[CANVAS_BYTES];
+static bool pushed_valid = false;
+static uint32_t last_push_ms = 0;
+static uint32_t push_count = 0;
+
 // Last-fetched board. Kept across failed fetches so the screen can go on
 // showing it — marked with its age — instead of going blank.
 static BoardData g_board = {};
 
 static uint32_t last_render_ms = 0;
-static UiScreen g_screen = SCREEN_MORRISTOWN;
+static long last_render_minute = -1;
+static bool dirty = true;  // something changed: render now, don't wait
+
+// Paging through later trains with the up/down toggle.
+static int g_page = 0;
+static uint32_t page_set_ms = 0;
 
 // Fetch scheduling.
 static uint32_t last_attempt_ms = 0;  // last fetch attempt (good or bad)
@@ -54,6 +70,7 @@ static bool fetch_now = true;  // fetch as soon as WiFi allows
 static net_state_t prev_net = NET_DISCONNECTED;
 static bool prev_time_valid = false;
 static uint32_t last_connected_ms = 0;  // last time WiFi was seen connected
+static bool clock_from_server = false;  // clock was set from the API, not NTP
 
 // ---- watchdog ---------------------------------------------------------------
 
@@ -83,7 +100,9 @@ static void restart(const char* why) {
   ESP.restart();
 }
 
-// ---- fetch + render ---------------------------------------------------------
+// ---- fetch ------------------------------------------------------------------
+
+static bool is_night() { return time_valid() && ui_is_night(time_now()); }
 
 // One fetch attempt (only when WiFi is up). Returns true on a good fetch.
 static bool fetch_board() {
@@ -93,10 +112,25 @@ static bool fetch_board() {
   bool ok = board_fetch(g_board, time_now(), time_valid());
   wdt_feed();
   last_attempt_ms = millis();
-  if (ok) last_ok_ms = last_attempt_ms;
-  fetch_wait_ms = ok ? FETCH_INTERVAL_MS : FETCH_RETRY_MS;
+  if (ok) {
+    last_ok_ms = last_attempt_ms;
+    // No clock yet (NTP unreachable)? The server just told us the time — good
+    // to within the edge cache's few seconds, and NTP corrects it when it can.
+    if (!time_valid() && g_board.serverNow > 1704067200) {  // sanity: >= 2024
+      struct timeval tv = {g_board.serverNow, 0};
+      settimeofday(&tv, nullptr);
+      clock_from_server = true;
+      Serial.printf("Time: set from the server (%lld)\n",
+                    (long long)g_board.serverNow);
+    }
+    dirty = true;
+  }
+  fetch_wait_ms = !ok ? FETCH_RETRY_MS
+                      : (is_night() ? FETCH_INTERVAL_NIGHT_MS : FETCH_INTERVAL_MS);
   return ok;
 }
+
+// ---- render -----------------------------------------------------------------
 
 static void push_canvas(bool full) {
   wdt_feed();
@@ -106,14 +140,30 @@ static void push_canvas(bool full) {
   display.drawBitmap(0, 0, canvas.getBuffer(), UI_W, UI_H, GxEPD_BLACK);
   display.display(!full);  // display(false)=full refresh, display(true)=partial
   wdt_feed();
+  memcpy(pushed, canvas.getBuffer(), CANVAS_BYTES);
+  pushed_valid = true;
+  last_push_ms = millis();
+  push_count++;
 }
 
-// Draw the current board into the canvas and push it to the panel. `full`
-// forces a flashing full refresh (de-ghost); otherwise a fast partial update.
-static void render_and_push(bool full) {
-  ui_draw(canvas, g_board, time_now(), net_state(), time_valid(), g_screen);
-  push_canvas(full);
+// Draw the board into the canvas; push it to the panel (a flashing full
+// refresh) only if it differs from what the panel already shows, or `force`.
+// Returns true when it pushed.
+static bool render(bool force) {
+  const time_t now = time_now();
+  const int pages = ui_page_count(g_board, now);
+  if (g_page >= pages) g_page = pages - 1;
+  if (g_page < 0) g_page = 0;
+
+  ui_draw(canvas, g_board, now, net_state(), time_valid(), g_page);
   last_render_ms = millis();
+  last_render_minute = (long)(now / 60);
+  dirty = false;
+  if (!force && pushed_valid &&
+      memcmp(pushed, canvas.getBuffer(), CANVAS_BYTES) == 0)
+    return false;
+  push_canvas(true);
+  return true;
 }
 
 // ---- OTA hooks --------------------------------------------------------------
@@ -125,7 +175,7 @@ static void ota_started() {
   push_canvas(false);  // fast partial update — don't keep the uploader waiting
 }
 
-static void ota_aborted() { render_and_push(true); }
+static void ota_aborted() { render(true); }
 
 // ---- serial commands --------------------------------------------------------
 
@@ -142,33 +192,48 @@ static void send_screenshot() {
 // One JSON line describing the device's health, for QA over serial.
 static void send_status() {
   const uint32_t up = millis();
+  const time_t now = time_now();
   const long okAge = last_ok_ms ? (long)((up - last_ok_ms) / 1000) : -1;
   const long boardAge =
-      (g_board.fetchedAt && time_valid())
-          ? (long)(time_now() - g_board.fetchedAt)
-          : -1;
+      (g_board.fetchedAt && time_valid()) ? (long)(now - g_board.fetchedAt) : -1;
   static const char* const NET[] = {"disconnected", "connecting", "connected"};
   Serial.printf(
       "{\"app\":\"family-dash-eink\",\"build\":\"%s %s\",\"uptime_s\":%lu,"
       "\"net\":\"%s\",\"ip\":\"%s\",\"rssi\":%d,\"time_valid\":%s,"
-      "\"epoch\":%lld,\"heap\":%u,\"min_heap\":%u,\"psram\":%u,"
+      "\"clock_from_server\":%s,\"epoch\":%lld,\"night\":%s,"
+      "\"heap\":%u,\"min_heap\":%u,\"psram\":%u,"
       "\"last_ok_s\":%ld,\"board_age_s\":%ld,\"http\":%d,\"fail_streak\":%d,"
-      "\"next_fetch_s\":%ld,\"boards\":%d,\"mode\":%d,\"show_leave\":%s,"
-      "\"expired\":%s,\"live_feed\":%d,\"degraded\":%s,\"screen\":%d,"
-      "\"ota\":%s}\n",
+      "\"next_fetch_s\":%ld,\"boards\":%d,\"trains\":%d,\"mode\":%d,"
+      "\"show_leave\":%s,\"expired\":%s,\"live_feed\":%d,\"alerts\":%d,"
+      "\"degraded\":%s,\"page\":%d,\"pages\":%d,\"pushes\":%lu,"
+      "\"last_push_s\":%ld,\"ota\":%s}\n",
       __DATE__, __TIME__, (unsigned long)(up / 1000), NET[net_state()],
       net_ip(), net_rssi(), time_valid() ? "true" : "false",
-      (long long)time_now(), (unsigned)ESP.getFreeHeap(),
+      clock_from_server ? "true" : "false", (long long)now,
+      is_night() ? "true" : "false", (unsigned)ESP.getFreeHeap(),
       (unsigned)ESP.getMinFreeHeap(), (unsigned)ESP.getFreePsram(), okAge,
       boardAge, g_board.lastHttpCode, g_board.failStreak,
       fetch_now ? 0L
                 : (long)(((long long)fetch_wait_ms -
                           (long long)(up - last_attempt_ms)) /
                          1000),
-      g_board.nBoards, (int)g_board.mode, g_board.showLeave ? "true" : "false",
+      g_board.nBoards, ui_train_count(g_board, now), (int)g_board.mode,
+      g_board.showLeave ? "true" : "false",
       g_board.scheduleExpired ? "true" : "false", (int)g_board.liveFeed,
-      ui_degraded(g_board, time_now(), time_valid()) ? "true" : "false",
-      (int)g_screen, ota_enabled() ? "true" : "false");
+      g_board.nAlerts,
+      ui_degraded(g_board, now, time_valid()) ? "true" : "false", g_page,
+      ui_page_count(g_board, now), (unsigned long)push_count,
+      pushed_valid ? (long)((up - last_push_ms) / 1000) : -1L,
+      ota_enabled() ? "true" : "false");
+}
+
+static void set_page(int page) {
+  const int pages = ui_page_count(g_board, time_now());
+  if (page >= pages) page = pages - 1;
+  if (page < 0) page = 0;
+  g_page = page;
+  page_set_ms = millis();
+  dirty = true;
 }
 
 static char cmd_buf[32];
@@ -181,19 +246,24 @@ static void check_serial_cmd() {
       cmd_buf[cmd_len] = 0;
       if (strcmp(cmd_buf, "screenshot") == 0) send_screenshot();
       else if (strcmp(cmd_buf, "status") == 0) send_status();
-      else if (strcmp(cmd_buf, "refresh") == 0) render_and_push(true);
-      else if (strcmp(cmd_buf, "screen") == 0) {
-        g_screen = (UiScreen)((g_screen + 1) % SCREEN_COUNT);
-        render_and_push(true);
+      else if (strcmp(cmd_buf, "refresh") == 0) render(true);
+      else if (strcmp(cmd_buf, "page") == 0 || strcmp(cmd_buf, "screen") == 0) {
+        // Next page of later trains, wrapping back to the first.
+        const int pages = ui_page_count(g_board, time_now());
+        set_page((g_page + 1) % pages);
+        render(true);
+      } else if (strncmp(cmd_buf, "page ", 5) == 0) {
+        set_page(atoi(cmd_buf + 5));
+        render(true);
       } else if (strcmp(cmd_buf, "fetch") == 0) {
         fetch_board();
-        render_and_push(true);
+        render(true);
       } else if (strncmp(cmd_buf, "settime ", 8) == 0) {
         // QA helper: inject a known wall-clock epoch (seconds) and redraw.
         struct timeval tv = {(time_t)strtoll(cmd_buf + 8, nullptr, 10), 0};
         settimeofday(&tv, nullptr);
         Serial.printf("time set to %lld\n", (long long)tv.tv_sec);
-        render_and_push(true);
+        render(true);
       }
       cmd_len = 0;
     } else if (cmd_len < sizeof(cmd_buf) - 1) {
@@ -268,12 +338,12 @@ void setup() {
   }
   Serial.printf("Time valid: %s\n", time_valid() ? "yes" : "no");
 
-  prev_net = net_state();
-  prev_time_valid = time_valid();
   last_connected_ms = millis();
 
-  fetch_board();          // first fetch (skipped if WiFi isn't up yet)
-  render_and_push(true);  // first draw is a full refresh
+  fetch_board();  // first fetch (skipped if WiFi isn't up yet); may set the clock
+  prev_net = net_state();
+  prev_time_valid = time_valid();
+  render(true);  // first draw is always pushed
   Serial.println("Dashboard ready.");
 }
 
@@ -284,51 +354,43 @@ void loop() {
   check_serial_cmd();
 
   // Fetch at once when WiFi comes (back) up or the clock is first set, rather
-  // than waiting out the timer; and redraw at once when the clock arrives,
-  // since the screen was showing "Setting the clock".
+  // than waiting out the timer; either also changes what the screen says.
   const net_state_t ns = net_state();
   const bool tv = time_valid();
-  bool redraw = false;
   if (ns == NET_CONNECTED) {
     last_connected_ms = millis();
     if (prev_net != NET_CONNECTED) fetch_now = true;
   }
+  if (ns != prev_net) dirty = true;
   if (tv && !prev_time_valid) {
     fetch_now = true;
-    redraw = true;
+    dirty = true;
   }
   prev_net = ns;
   prev_time_valid = tv;
 
-  // Up/down toggle switches station; also resets the auto-rotate timer.
+  // Up/down toggle pages through later trains; it goes back by itself.
   BtnEvent be = buttons_poll();
   if (be != BTN_NONE) {
-    if (be == BTN_DOWN)
-      g_screen = (UiScreen)((g_screen + 1) % SCREEN_COUNT);
-    else
-      g_screen = (UiScreen)((g_screen + SCREEN_COUNT - 1) % SCREEN_COUNT);
-    Serial.printf("BTN %s -> screen %d\n", be == BTN_DOWN ? "DOWN" : "UP",
-                  (int)g_screen);
-    redraw = true;
+    set_page(g_page + (be == BTN_DOWN ? 1 : -1));
+    Serial.printf("BTN %s -> page %d\n", be == BTN_DOWN ? "DOWN" : "UP", g_page);
   }
+  if (g_page != 0 && millis() - page_set_ms >= PAGE_RETURN_MS) set_page(0);
 
-  // Refetch: 3 min after a good fetch, 30 s after a failed one. Fresh data is
-  // normally picked up by the next rotate tick (no extra flash) — but if the
-  // screen was showing a problem (no board yet, stale, offline, expired
-  // timetable), a fetch that clears it is drawn straight away.
+  // Refetch: 3 min after a good fetch (15 at night), 30 s after a failed one.
   if (ns == NET_CONNECTED &&
       (fetch_now || millis() - last_attempt_ms >= fetch_wait_ms)) {
-    const bool wasDegraded = ui_degraded(g_board, time_now(), tv);
-    if (fetch_board() && wasDegraded) redraw = true;
+    fetch_board();
   }
 
-  // Rotate to the next screen (full refresh, which also refreshes the
-  // countdowns from the local clock).
-  if (redraw) {
-    render_and_push(true);
-  } else if (millis() - last_render_ms >= ROTATE_INTERVAL_MS) {
-    g_screen = (UiScreen)((g_screen + 1) % SCREEN_COUNT);
-    render_and_push(true);
+  // Re-render when something changed, on the minute (the clock and every
+  // countdown tick then), and every few seconds as a backstop. The panel is
+  // only touched if the picture is different.
+  const bool minute_turned =
+      tv && (long)(time_now() / 60) != last_render_minute;
+  if (dirty || minute_turned ||
+      millis() - last_render_ms >= RENDER_INTERVAL_MS) {
+    render(false);
   }
 
   self_heal();
