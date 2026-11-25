@@ -500,6 +500,28 @@ export function alertAffectsTrains(text: string): boolean {
   );
 }
 
+// The lines these boards ride on, and the other NJ Transit rail lines. The big
+// terminals' station messages cover every line that calls there, so an alert
+// about, say, a Montclair-Boonton cancellation shows up on Hoboken's board.
+const OUR_LINES =
+  /morris\s*(?:&|and)\s*essex|\bM\s?&\s?E\b|morristown|gladstone|bernardsville|midtown direct/i;
+const OTHER_LINES =
+  /\bMOBO\b|montclair|boonton|main\s*[/-]?\s*bergen|bergen county|pascack|port jervis|northeast corridor|\bNEC\b|north jersey coast|\bNJCL\b|raritan|\bRVL\b|atlantic city|\bACRL\b|meadowlands|princeton/i;
+
+/**
+ * Is this alert about the owner's trains? Yes if it names their line or
+ * stations; no if it only names other lines; and yes if it names no line at
+ * all (e.g. "all trains into Penn Station New York are subject to delays").
+ */
+export function alertIsForOurLines(text: string): boolean {
+  return OUR_LINES.test(text) || !OTHER_LINES.test(text);
+}
+
+/** Worth showing: it says trains are affected, and they are (or may be) ours. */
+export function alertIsUrgent(text: string): boolean {
+  return alertAffectsTrains(text) && alertIsForOurLines(text);
+}
+
 export type BoardVariant = "full" | "light";
 
 /**

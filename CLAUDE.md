@@ -114,7 +114,9 @@ is: no transfers, no Morristown→Hoboken, no pickup view).
 drive: live|earlier|none|off }`, `commute`, and `boards[]` each with
 `driveMin`, `driveSource`, `driveMeasuredAtMs`, `source` and `departures[]` (`depEpochMs`,
 `arrEpochMs`, `leaveByEpochMs`, `train`, `source: live|schedule`, `live`).
-Also `alerts[]` (`{text, urgent}` — NJ Transit's station messages, which arrive with
+Also `alerts[]` (`{text, urgent}`; `urgent` = it says trains are affected AND it is
+about the owner's lines or names no line — other lines' alerts show up on the
+big terminals' boards — NJ Transit's station messages, which arrive with
 the boards at no extra cost) and `status.device.lastSeenMs` (the sign's last
 check-in). `?now=<epochMs>` overrides the clock for testing; it never touches
 live data and is never cached. Responses are edge-cached for 15 s.

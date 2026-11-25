@@ -17,6 +17,7 @@ import {
   matchLiveStatus,
   parseNjtDate,
   alertAffectsTrains,
+  alertIsUrgent,
   parseStationMessages,
   stationAlerts,
   toLiveTrain,
@@ -140,6 +141,26 @@ describe("station messages (service alerts)", () => {
       "The elevator at Morristown is out of service.",
       "Trains are operating on a holiday schedule on Thursday.",
     ]) expect(alertAffectsTrains(t), t).toBe(false);
+  });
+
+  it("are urgent only for the owner's lines — not other lines' trouble at the big terminals", () => {
+    for (const t of [
+      "M&E trains are subject to 20-minute delays due to signal problems near Summit.",
+      "Morris & Essex and Montclair-Boonton trains are subject to delays.",
+      "Gladstone Branch service is suspended in both directions.",
+      "Midtown Direct trains are diverted to Hoboken; expect delays.",
+      // no line named: it may well be ours
+      "Trains in and out of Penn Station New York are subject to up to 30-minute delays due to Amtrak overhead wire problems.",
+    ]) expect(alertIsUrgent(t), t).toBe(true);
+    for (const t of [
+      // real alerts from Hoboken's board on 25 Nov 2026
+      "MOBO train #262, the 6:39 PM departure from MSU, scheduled to arrive in Hoboken at 7:22 PM, is cancelled due to equipment availability. Please take train #264.",
+      "MOBO train #267, the 5:23 PM departure from Hoboken, scheduled to arrive in MSU at 6:10 PM, is cancelled due to equipment availability.",
+      "Northeast Corridor trains are subject to 15-minute delays.",
+      "Raritan Valley Line service is suspended between Raritan and High Bridge.",
+      // ours, but nothing is wrong
+      "Morris and Essex train #339, the 6:07 PM departure from Hoboken, scheduled to arrive in Summit at 6:54 PM, will operate today, 11/25/2026.",
+    ]) expect(alertIsUrgent(t), t).toBe(false);
   });
 
   it("ride along with the board fetch — no extra call", async () => {
