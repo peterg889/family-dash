@@ -74,9 +74,9 @@ there carries its full stop list, so one call gives departure and arrival times
 in both directions. In the evening the city station's board adds the track and
 "boarding" status at Penn / Hoboken.
 
-NJ Transit allows about five logins a day, so the login token is shared across
-server instances and replaced only when the API explicitly rejects it — a
-timeout is never treated as a bad token. Without credentials, or if the live
+NJ Transit allows about five logins a day, so one login token is shared across
+server instances and deployments and replaced only when the API explicitly
+rejects it — a timeout is never treated as a bad token. Without credentials, or if the live
 feed is down, the board says so and shows the timetable.
 
 ## The timetable
