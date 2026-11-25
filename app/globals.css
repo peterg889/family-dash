@@ -247,6 +247,17 @@ body::before {
   color: var(--late);
 }
 
+/* Degraded-data notice (expired timetable, server unreachable, no live status). */
+.notice {
+  margin: 0 0 8px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--late);
+  background: rgba(255, 107, 94, 0.08);
+  font-size: clamp(10px, 1.3vw, 12px);
+  letter-spacing: 0.04em;
+  color: var(--ink);
+}
+
 .none {
   text-align: left;
   padding: 3px 0 6px;
