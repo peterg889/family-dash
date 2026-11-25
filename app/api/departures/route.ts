@@ -10,11 +10,13 @@ import { driveTo, driveToAddress, type DriveEstimate } from "@/lib/driving";
 import {
   fetchStationBoards,
   hasCredentials,
+  stationAlerts,
   NJT_STATION_2CHAR,
   type BoardVariant,
   type LiveTrain,
 } from "@/lib/njtransit";
 import { buildBoard } from "@/lib/board";
+import { deviceId, lastSeen, recordHeartbeat } from "@/lib/heartbeat";
 
 export const dynamic = "force-dynamic";
 
@@ -44,7 +46,12 @@ const INBOUND: BoardDef[] = [
 // The stations we live near; their live boards cover both directions.
 const HOME_STATIONS = new Set(["92", "18"]);
 
-const TRAINS_PER_BOARD = 5;
+const TRAINS_PER_BOARD = 5; // default; `?limit=` may ask for up to MAX_TRAINS_PER_BOARD
+const MAX_TRAINS_PER_BOARD = 16;
+
+// The E-Ink sign identifies itself with `?device=eink`; its last check-in is
+// reported in `status.device` for the health check.
+const SIGN_ID = "eink";
 
 // Leave home this many ms before (departure − drive time), as a safety margin.
 const BUFFER_MS = 5 * 60_000;
@@ -72,9 +79,19 @@ function nyHour(now: number): number {
 }
 
 type Mode = "morning" | "evening" | "next-morning";
+type Direction = "outbound" | "inbound";
 
-/** Pick which routes / direction / day to show based on the time of day. */
-function pickMode(now: number): {
+/**
+ * Pick which routes / direction / day to show. With no `want`, the time of day
+ * decides (to the city until 3 PM, heading home until 8 PM, then tomorrow
+ * morning). `want` pins the direction instead: the sign at home always asks
+ * for "outbound" (it is only looked at when leaving), and the web page lets you
+ * flip to the trip home at any hour.
+ */
+function pickMode(
+  now: number,
+  want: Direction | null
+): {
   mode: Mode;
   direction: "outbound" | "inbound";
   boards: BoardDef[];
@@ -84,7 +101,18 @@ function pickMode(now: number): {
   headline: string;
 } {
   const h = nyHour(now);
-  if (h < EVENING_FROM) {
+  if (want === "inbound") {
+    return {
+      mode: "evening",
+      direction: "inbound",
+      boards: INBOUND,
+      // "any", not "today": late at night the next trains home leave after midnight.
+      dayFilter: "any",
+      showLeave: false,
+      headline: "Heading home",
+    };
+  }
+  if (want === "outbound" ? h < NEXT_MORNING_FROM : h < EVENING_FROM) {
     return {
       mode: "morning",
       direction: "outbound",
@@ -94,7 +122,7 @@ function pickMode(now: number): {
       headline: "To NYC · today",
     };
   }
-  if (h < NEXT_MORNING_FROM) {
+  if (want !== "outbound" && h < NEXT_MORNING_FROM) {
     return {
       mode: "evening",
       direction: "inbound",
@@ -136,7 +164,8 @@ export async function GET(req: Request) {
   // `?now=<epochMs>` overrides the clock for testing the time-of-day windows.
   // An overridden clock never touches live data or live traffic (they describe
   // the real present), and its response is never cached.
-  const override = new URL(req.url).searchParams.get("now");
+  const query = new URL(req.url).searchParams;
+  const override = query.get("now");
   const overridden = override !== null;
   const now = overridden ? Number(override) : Date.now();
   if (!Number.isFinite(now) || now < 0 || now > 8.64e15) {
@@ -146,6 +175,21 @@ export async function GET(req: Request) {
     );
   }
 
+  const wantDirection: Direction | null =
+    query.get("direction") === "outbound"
+      ? "outbound"
+      : query.get("direction") === "inbound"
+        ? "inbound"
+        : null;
+  const limitParam = Number.parseInt(query.get("limit") ?? "", 10);
+  const limit = Number.isFinite(limitParam)
+    ? Math.min(MAX_TRAINS_PER_BOARD, Math.max(1, limitParam))
+    : TRAINS_PER_BOARD;
+
+  // The sign checking in. (Never for a test clock.)
+  const device = overridden ? null : deviceId(query.get("device"));
+  const heartbeatPromise = device ? recordHeartbeat(device) : Promise.resolve();
+
   const {
     mode,
     direction,
@@ -154,7 +198,7 @@ export async function GET(req: Request) {
     minNyMinutes,
     showLeave,
     headline,
-  } = pickMode(now);
+  } = pickMode(now, wantDirection);
 
   // --- drive times -----------------------------------------------------------
   // Always real Google measurements (see lib/driving.ts): re-measured every few
@@ -180,9 +224,9 @@ export async function GET(req: Request) {
     : Promise.resolve([]);
 
   // --- live boards -----------------------------------------------------------
-  // Real-time data only exists for the near term, so only today's boards use
-  // it; the next-morning preview is timetable-only.
-  const wantLive = !overridden && dayFilter === "today";
+  // Real-time data only exists for the near term, so tomorrow's preview is
+  // timetable-only; everything else is built from the live board.
+  const wantLive = !overridden && dayFilter !== "tomorrow";
   const liveRequests: { code: string; variant: BoardVariant }[] = [];
   if (wantLive && hasCredentials()) {
     const seen = new Set<string>();
@@ -208,10 +252,11 @@ export async function GET(req: Request) {
     new Map<string, LiveTrain[] | null>()
   );
 
-  const [commute, drives, liveBoards] = await Promise.all([
+  const [commute, drives, liveBoards, signSeenMs] = await Promise.all([
     commutePromise,
     drivesPromise,
     livePromise,
+    heartbeatPromise.then(() => lastSeen(SIGN_ID)),
   ]);
   const driveByOrigin = new Map(drives);
 
@@ -231,7 +276,7 @@ export async function GET(req: Request) {
       origin,
       dest,
       now,
-      limit: TRAINS_PER_BOARD,
+      limit,
       dayFilter,
       minNyMinutes,
       homeIsOrigin,
@@ -281,6 +326,12 @@ export async function GET(req: Request) {
       "&travelmode=driving",
   };
 
+  // NJ Transit's own service alerts for these stations — they arrive with the
+  // boards we already fetched.
+  const alerts = wantLive
+    ? stationAlerts(liveRequests.map((r) => r.code)).map((text) => ({ text }))
+    : [];
+
   // What each data source is doing, so screens can say what's wrong instead of
   // showing a plausible-looking empty board.
   const driveSources = [...driveByOrigin.values()].map((d) => d?.source ?? null);
@@ -299,6 +350,8 @@ export async function GET(req: Request) {
         : driveSources.some((s) => s === "earlier")
           ? ("earlier" as const)
           : ("none" as const),
+    // When the E-Ink sign last asked for a board (null = never / unknown).
+    device: { id: SIGN_ID, lastSeenMs: signSeenMs },
   };
 
   return NextResponse.json(
@@ -311,6 +364,7 @@ export async function GET(req: Request) {
       showLeave,
       headline,
       status,
+      alerts,
       commute,
       boards,
     },

@@ -124,6 +124,19 @@ describe("outside the live hours", () => {
     expect(calls).toHaveLength(1);
   });
 
+  it("with no measurement at all, a failed attempt is retried within minutes, not half an hour", async () => {
+    vi.setSystemTime(at(14, 1));
+    let calls = stubFetch(() => json({ error: { status: "INVALID_ARGUMENT" } }, 400));
+    expect(await driveTo("92", STATION, true)).toBeNull();
+    vi.setSystemTime(at(14, 3));
+    expect(await driveTo("92", STATION, true)).toBeNull();
+    expect(calls).toHaveLength(1); // still one per 5-minute slot
+    vi.setSystemTime(at(14, 6)); // e.g. the key was just replaced
+    calls = stubFetch(google(1140));
+    expect(await driveTo("92", STATION, true)).toMatchObject({ sec: 1140, source: "live" });
+    expect(calls).toHaveLength(1);
+  });
+
   it("refreshes a measurement that is more than a day old", async () => {
     vi.setSystemTime(at(7, 55));
     stubFetch(google(1080));

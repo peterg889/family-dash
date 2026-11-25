@@ -48,7 +48,9 @@ type Destination =
 
 // In the live hours: at most one measurement per destination per 5 minutes.
 const SLOT_MS = 5 * 60_000;
-// Outside them: only when there's no recent measurement, and then at most this often.
+// Outside them: only when the last measurement is over a day old, and then at
+// most this often. (With no measurement at all — a new key, a first deploy —
+// the 5-minute slot is used, so the board isn't left without a drive time.)
 const OFF_HOURS_SLOT_MS = 30 * 60_000;
 // "Recent" outside the live hours: this morning's measurements stay good until
 // tomorrow's live hours begin (at most ~22 h later).
@@ -238,7 +240,11 @@ async function estimate(
     !!last && now - last.at < (live ? SLOT_MS : OFF_HOURS_MAX_AGE_MS);
 
   if (!freshEnough && allowGoogle && liveTrafficConfigured()) {
-    const m = await measureOnce(key, destination, live ? SLOT_MS : OFF_HOURS_SLOT_MS);
+    const m = await measureOnce(
+      key,
+      destination,
+      live || !last ? SLOT_MS : OFF_HOURS_SLOT_MS
+    );
     if (m) return toEstimate(m, now);
   }
   // No new measurement: keep showing the last real one, however old, marked as such.

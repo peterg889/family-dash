@@ -247,6 +247,55 @@ body::before {
   color: var(--late);
 }
 
+/* Direction switch: to the city / heading home. */
+.direction {
+  display: flex;
+  gap: 6px;
+  margin: 8px 0;
+}
+.direction button {
+  flex: 1 1 0;
+  padding: 7px 8px;
+  border: 1px solid var(--rule);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--dim);
+  font: inherit;
+  font-weight: 600;
+  font-size: clamp(11px, 1.4vw, 13px);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.direction button.on {
+  border-color: var(--amber-soft);
+  background: rgba(255, 176, 46, 0.1);
+  color: var(--amber);
+}
+.direction button:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 1px;
+}
+
+/* NJ Transit's own service alert for these stations. */
+.alert {
+  margin: 0 0 8px;
+  padding: 7px 10px;
+  border-left: 3px solid var(--amber);
+  background: rgba(255, 176, 46, 0.09);
+  font-size: clamp(11px, 1.4vw, 13px);
+  line-height: 1.35;
+  color: var(--ink);
+}
+.alert-tag {
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  font-size: 0.82em;
+  color: var(--amber);
+  margin-right: 4px;
+}
+
 /* Degraded-data notice (expired timetable, server unreachable, no live status). */
 .notice {
   margin: 0 0 8px;
