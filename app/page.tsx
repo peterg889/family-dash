@@ -24,7 +24,9 @@ type Departure = {
   live?: LiveStatus | null;
 };
 
-type DriveSource = "live" | "typical" | null;
+// "live": measured by Google in the last few minutes. "earlier": Google's most
+// recent measurement (outside the morning hours it isn't re-measured).
+type DriveSource = "live" | "earlier" | null;
 
 type Board = {
   origin: string;
@@ -32,6 +34,7 @@ type Board = {
   destShort?: string;
   driveMin: number | null;
   driveSource?: DriveSource;
+  driveMeasuredAtMs?: number | null;
   departures: Departure[];
 };
 
@@ -39,6 +42,7 @@ type Commute = {
   name: string;
   driveMin: number | null;
   driveSource?: DriveSource;
+  driveMeasuredAtMs?: number | null;
   etaEpochMs: number | null;
   mapsUrl: string;
 };
@@ -52,7 +56,7 @@ type Status = {
     expired: boolean;
   };
   live: "ok" | "down" | "off";
-  drive: "live" | "typical" | "none" | "off";
+  drive: "live" | "earlier" | "none" | "off";
 };
 
 type ApiResponse = {
@@ -65,9 +69,23 @@ type ApiResponse = {
   boards: Board[];
 };
 
-/** "16" for live traffic, "~16" for a typical (not live) drive time. */
+/** "16" for a just-measured drive time, "~16" for an earlier measurement. */
 function driveLabel(min: number, source?: DriveSource): string {
-  return source === "typical" ? `~${min}` : `${min}`;
+  return source === "earlier" ? `~${min}` : `${min}`;
+}
+
+/** Tooltip saying when Google measured this drive time. */
+function driveTitle(source?: DriveSource, measuredAtMs?: number | null): string {
+  if (!measuredAtMs) return "";
+  const when = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    weekday: "short",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(measuredAtMs);
+  return source === "earlier"
+    ? `Google traffic, measured ${when} (re-measured each morning)`
+    : `Google traffic, measured ${when}`;
 }
 
 /** One-line notices about degraded data, most serious first. */
@@ -85,7 +103,8 @@ function notices(data: ApiResponse, stale: boolean, error: boolean): string[] {
   }
   if (error || stale) out.push("Can’t reach the server — showing the last board received.");
   if (st?.live === "down") out.push("NJ Transit live status unavailable — showing the timetable only.");
-  if (st?.drive === "none") out.push("No drive times configured — showing train times only.");
+  if (st?.drive === "none")
+    out.push("No drive time — Google traffic isn’t answering. Showing train times only.");
   return out;
 }
 
@@ -195,7 +214,7 @@ function BoardGroup({
           {board.driveMin != null && (
             <span
               className="drive"
-              title={board.driveSource === "typical" ? "typical drive time (not live traffic)" : "live traffic"}
+              title={driveTitle(board.driveSource, board.driveMeasuredAtMs)}
             >
               {driveLabel(board.driveMin, board.driveSource)} min drive
             </span>

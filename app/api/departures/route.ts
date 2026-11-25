@@ -6,12 +6,7 @@ import {
   scheduleStatus,
   type DayFilter,
 } from "@/lib/departures";
-import {
-  driveTo,
-  driveToAddress,
-  inLiveTrafficHours,
-  type DriveEstimate,
-} from "@/lib/driving";
+import { driveTo, driveToAddress, type DriveEstimate } from "@/lib/driving";
 import {
   fetchStationBoards,
   hasCredentials,
@@ -162,12 +157,12 @@ export async function GET(req: Request) {
   } = pickMode(now);
 
   // --- drive times -----------------------------------------------------------
-  // Live traffic only matters while someone is about to leave: today's outbound
-  // boards, inside the commute hours. Everything else uses the typical time.
-  const wantLiveTraffic =
-    !overridden && mode === "morning" && inLiveTrafficHours(now);
+  // Always real Google measurements (see lib/driving.ts): re-measured every few
+  // minutes during the morning live hours, otherwise the most recent one. A
+  // test clock never calls Google.
+  const allowGoogle = !overridden;
 
-  const commutePromise = driveToAddress("commute", commute.address, wantLiveTraffic);
+  const commutePromise = driveToAddress("commute", commute.address, allowGoogle);
 
   // Drive-to-station / leave-by only applies to outbound (you drive from home
   // to the departure station). Compute once per unique origin station.
@@ -176,7 +171,7 @@ export async function GET(req: Request) {
     ? Promise.all(
         originIds.map(
           async (id) =>
-            [id, await driveTo(id, STATION_COORDS[id], wantLiveTraffic)] as [
+            [id, await driveTo(id, STATION_COORDS[id], allowGoogle)] as [
               string,
               DriveEstimate | null,
             ]
@@ -252,6 +247,7 @@ export async function GET(req: Request) {
       destShort: short,
       driveMin: drive ? Math.round(drive.sec / 60) : null,
       driveSource: drive ? drive.source : null,
+      driveMeasuredAtMs: drive ? drive.measuredAt : null,
       source: built.source,
       departures: built.departures.map((d) => ({
         depEpochMs: d.depEpochMs,
@@ -275,6 +271,7 @@ export async function GET(req: Request) {
     name: commute.name,
     driveMin: commute ? Math.round(commute.sec / 60) : null,
     driveSource: commute ? commute.source : null,
+    driveMeasuredAtMs: commute ? commute.measuredAt : null,
     etaEpochMs: commute ? now + commute.sec * 1000 : null,
     // No origin: Google Maps starts from wherever the phone is, and the home
     // address never appears in this (public) response.
@@ -299,8 +296,8 @@ export async function GET(req: Request) {
       ? ("off" as const)
       : driveSources.some((s) => s === "live")
         ? ("live" as const)
-        : driveSources.some((s) => s === "typical")
-          ? ("typical" as const)
+        : driveSources.some((s) => s === "earlier")
+          ? ("earlier" as const)
           : ("none" as const),
   };
 

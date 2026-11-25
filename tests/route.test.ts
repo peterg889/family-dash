@@ -1,7 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { json, mockNextCache, sharedCache, stubFetch } from "./helpers";
+import {
+  json,
+  mockNextCache,
+  mockVercelFunctions,
+  runtimeCache,
+  sharedCache,
+  stubFetch,
+} from "./helpers";
 
 vi.mock("next/cache", () => mockNextCache());
+vi.mock("@vercel/functions", () => mockVercelFunctions());
 
 import bundled from "@/data/schedule.json";
 import { GET } from "@/app/api/departures/route";
@@ -21,10 +29,21 @@ const call = async (query = "") => {
   return { res, body: await res.json() };
 };
 
+// Pretend Google measured these drive times a little while ago.
+const seedDriveTimes = (minutes: Record<string, number>, ageMs = 30 * 60_000) => {
+  for (const [key, min] of Object.entries(minutes)) {
+    runtimeCache.set(`drive$last:${key}`, {
+      value: { sec: min * 60, at: Date.now() - ageMs },
+      expires: Infinity,
+    });
+  }
+};
+
 beforeEach(() => {
   process.env.HOME_ADDRESS = HOME;
-  process.env.DRIVE_TYPICAL_MIN = "92=16,18=10,commute=15";
   delete process.env.GOOGLE_MAPS_API_KEY;
+  runtimeCache.clear();
+  seedDriveTimes({ "92": 16, "18": 10, commute: 15 });
   delete process.env.NJT_API_USERNAME;
   delete process.env.NJT_API_PASSWORD;
   sharedCache.clear();
@@ -46,12 +65,13 @@ describe("GET /api/departures", () => {
     expect(JSON.parse(text).commute.mapsUrl).not.toContain("origin=");
   });
 
-  it("morning: outbound boards with a leave-by from the typical drive time", async () => {
+  it("morning: outbound boards with a leave-by from Google's last measurement", async () => {
     const { body } = await call(`?now=${at(7)}`);
     expect(body).toMatchObject({ mode: "morning", showLeave: true, direction: "outbound" });
-    expect(body.status).toMatchObject({ live: "off", drive: "typical", schedule: { expired: false } });
+    expect(body.status).toMatchObject({ live: "off", drive: "earlier", schedule: { expired: false } });
     const mr = body.boards[0];
-    expect(mr).toMatchObject({ origin: "Morristown", destShort: "Penn", driveMin: 16, driveSource: "typical" });
+    expect(mr).toMatchObject({ origin: "Morristown", destShort: "Penn", driveMin: 16, driveSource: "earlier" });
+    expect(mr.driveMeasuredAtMs).toBeLessThan(Date.now());
     expect(mr.departures.length).toBeGreaterThan(0);
     const d = mr.departures[0];
     expect(d.leaveByEpochMs).toBe(d.depEpochMs - 16 * 60_000 - 5 * 60_000);
@@ -80,8 +100,8 @@ describe("GET /api/departures", () => {
     expect(body.boards.every((b: { departures: unknown[] }) => b.departures.length === 0)).toBe(true);
   });
 
-  it("reports missing drive times rather than pretending it's evening", async () => {
-    delete process.env.DRIVE_TYPICAL_MIN;
+  it("reports missing drive times rather than guessing or pretending it's evening", async () => {
+    runtimeCache.clear(); // Google has never answered
     const { body } = await call(`?now=${at(7)}`);
     expect(body.showLeave).toBe(true);
     expect(body.status.drive).toBe("none");

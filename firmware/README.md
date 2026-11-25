@@ -43,7 +43,8 @@ it. The API URL is `BOARD_API_URL` in `src/config.h`.
 - **DEPARTS IN** — evening boards (city → home): the train leaving the city.
 - **TOMORROW • LEAVE AT 6:52 am** — any train on a later calendar day is given
   as a clock time with the day spelled out, never as a 9-hour countdown.
-- **~16 min drive** — the `~` marks a typical (not live-traffic) drive time.
+- **~16 min drive** — the `~` marks a drive time Google measured earlier (it is
+  only re-measured during the morning hours), rather than in the last few minutes.
 - **Pills** (`+6 late`, `DELAYED`, `ALL ABOARD`, `CANCELLED`) are live NJ
   Transit status. A cancelled train is never the big number: the next running
   train is, with `7:38a CANCELLED` beside the label to show why.

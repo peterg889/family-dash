@@ -1,31 +1,43 @@
 /**
- * Drive time from home to a destination — "typical first, live when it matters".
+ * Drive time from home to a destination — measured by Google, never guessed.
  *
- * 1. Every destination has a TYPICAL drive time you set once (DRIVE_TYPICAL_MIN).
- *    That alone gives the board a "leave by" for every train, with no outside
- *    service involved and nothing that can fail.
- * 2. LIVE traffic from the Google Routes API is an optional refinement on top,
- *    asked for only during the hours when someone is actually about to leave
- *    (DRIVE_LIVE_HOURS), at most once per destination per 10 minutes across all
- *    server instances. If Google is unconfigured, down, over quota, or the key
- *    is dead, the board quietly uses the typical time and says so.
+ * Every figure here is a real traffic-aware measurement from the Google Routes
+ * API. To keep the number of Google calls small and predictable:
  *
- * Callers get { sec, source } so screens can mark a typical time ("~16 min").
+ *   - During the LIVE HOURS (default 6–8 AM New York, when someone is about to
+ *     leave) each destination is re-measured about every 5 minutes.
+ *   - Outside those hours nothing is measured; the board keeps showing the most
+ *     recent measurement — in practice the last one from that morning — and
+ *     marks it as earlier ("~16 min"). The one exception: if there is no
+ *     measurement from the last day or so (first deploy, or the morning was
+ *     missed), one is taken so the board isn't left without a drive time.
+ *   - If Google can't be reached, the last measurement keeps being shown,
+ *     marked as earlier. If there has never been one, there is no drive time
+ *     and the screens say so.
  *
- * Environment (all optional; set in Vercel, never in the repo):
+ * Cost bound: 2 hours x 12 five-minute slots x 3 destinations = 72 Google calls
+ * a day, however many screens are polling.
+ *
+ * Measurements are kept in Vercel's Runtime Cache, shared by every server
+ * instance, so instances neither repeat each other's calls nor lose the last
+ * measurement on a cold start.
+ *
+ * Environment (set in Vercel, never in the repo):
  *   HOME_ADDRESS         where drives start — only ever sent to Google
- *   GOOGLE_MAPS_API_KEY  a Google Cloud key with the Routes API enabled
- *   DRIVE_TYPICAL_MIN    typical minutes per destination, e.g. "92=16,18=10,commute=15"
- *                        (keys: GTFS stop id of a station, or "commute" for the school run)
- *   DRIVE_LIVE_HOURS     New York hours to ask for live traffic, default "5-11"
- *
- * Cost bound: 6 hours x 6 ten-minute slots x 3 destinations = 108 Google calls
- * a day at most, however many screens are polling.
+ *   GOOGLE_MAPS_API_KEY  a Google Cloud API key with the Routes API enabled
+ *   DRIVE_LIVE_HOURS     New York hours to measure in, default "6-8"
  */
 
-import { unstable_cache } from "next/cache";
+import { getCache } from "@vercel/functions";
 
-export type DriveEstimate = { sec: number; source: "live" | "typical" };
+export type DriveEstimate = {
+  sec: number;
+  /** "live": measured within the last few minutes. "earlier": the most recent measurement we have. */
+  source: "live" | "earlier";
+  measuredAt: number; // epoch ms of the Google measurement
+};
+
+type Measurement = { sec: number; at: number };
 
 type LatLon = { lat: number; lon: number };
 
@@ -34,7 +46,18 @@ type Destination =
   | { location: { latLng: { latitude: number; longitude: number } } }
   | { address: string };
 
-const SLOT_MS = 10 * 60_000;
+// In the live hours: at most one measurement per destination per 5 minutes.
+const SLOT_MS = 5 * 60_000;
+// Outside them: only when there's no recent measurement, and then at most this often.
+const OFF_HOURS_SLOT_MS = 30 * 60_000;
+// "Recent" outside the live hours: this morning's measurements stay good until
+// tomorrow's live hours begin (at most ~22 h later).
+const OFF_HOURS_MAX_AGE_MS = 26 * 3600_000;
+// Shown as "live" on the screens up to this age.
+const LIVE_MAX_AGE_MS = SLOT_MS + 2 * 60_000;
+// How long the last good measurement is remembered if Google stops answering.
+const KEEP_S = 7 * 24 * 3600;
+
 const CALL_TIMEOUT_MS = 2500;
 
 // --- configuration (read at call time so tests and env changes take effect) ---
@@ -43,19 +66,7 @@ function homeAddress(): string | null {
   return process.env.HOME_ADDRESS?.trim() || null;
 }
 
-/** "92=16,18=10,commute=15" -> Map { "92" => 16, ... } (minutes). */
-export function parseTypical(raw: string | undefined): Map<string, number> {
-  const out = new Map<string, number>();
-  for (const part of (raw ?? "").split(/[,;\n]/)) {
-    const m = part.trim().match(/^([^=:\s]+)\s*[=:]\s*(\d+(?:\.\d+)?)$/);
-    if (!m) continue;
-    const min = Number(m[2]);
-    if (min > 0 && min < 600) out.set(m[1].toLowerCase(), min);
-  }
-  return out;
-}
-
-/** "5-11" -> [5, 11): live traffic is requested from 5:00 up to (not incl.) 11:00. */
+/** "6-8" -> [6, 8): measurements are taken from 6:00 up to (not incl.) 8:00. */
 export function parseLiveHours(raw: string | undefined): [number, number] {
   const m = (raw ?? "").trim().match(/^(\d{1,2})\s*-\s*(\d{1,2})$/);
   if (m) {
@@ -63,7 +74,7 @@ export function parseLiveHours(raw: string | undefined): [number, number] {
     const b = Number(m[2]);
     if (a >= 0 && b <= 24 && a < b) return [a, b];
   }
-  return [5, 11];
+  return [6, 8];
 }
 
 function nyHour(nowMs: number): number {
@@ -76,32 +87,52 @@ function nyHour(nowMs: number): number {
   return h === 24 ? 0 : h;
 }
 
-/** Whether live traffic is configured at all (address + key present). */
+/** Whether Google traffic is configured at all (address + key present). */
 export function liveTrafficConfigured(): boolean {
   return !!homeAddress() && !!process.env.GOOGLE_MAPS_API_KEY;
 }
 
-/** Whether `nowMs` falls in the hours when live traffic is worth asking for. */
+/** Whether `nowMs` falls in the hours when drive times are re-measured. */
 export function inLiveTrafficHours(nowMs: number = Date.now()): boolean {
   const [from, to] = parseLiveHours(process.env.DRIVE_LIVE_HOURS);
   const h = nyHour(nowMs);
   return h >= from && h < to;
 }
 
-// --- live traffic (Google Routes) ---------------------------------------------
+// --- shared cache --------------------------------------------------------------
+// A cache hiccup must never break the board, so every access is guarded: a
+// failed read is a miss, a failed write is ignored.
 
-/**
- * One Google Routes call. Returns seconds, or null on any failure — and null is
- * a result too: it is cached for the slot, so a dead key or an outage costs one
- * quick call per destination per 10 minutes rather than one per request.
- * `slot` only forms the cache key.
- */
+const cache = () => getCache({ namespace: "drive" });
+
+async function cacheGet<T>(key: string): Promise<T | null> {
+  try {
+    return ((await cache().get(key)) as T | null | undefined) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function cacheSet(key: string, value: unknown, ttlSeconds: number): Promise<void> {
+  try {
+    await cache().set(key, value, { ttl: ttlSeconds, name: key });
+  } catch {
+    // ignore
+  }
+}
+
+async function readLast(key: string): Promise<Measurement | null> {
+  const m = await cacheGet<Measurement>(`last:${key}`);
+  return m && typeof m.sec === "number" && typeof m.at === "number" ? m : null;
+}
+
+// --- Google Routes ---------------------------------------------------------------
+
+/** One Google Routes call. Returns seconds, or null on any failure (reason logged). */
 async function googleDriveSeconds(
   key: string,
-  destinationJson: string,
-  slot: number
+  destination: Destination
 ): Promise<number | null> {
-  void slot;
   const apiKey = process.env.GOOGLE_MAPS_API_KEY;
   const origin = homeAddress();
   if (!apiKey || !origin) return null;
@@ -117,7 +148,7 @@ async function googleDriveSeconds(
         },
         body: JSON.stringify({
           origin: { address: origin },
-          destination: JSON.parse(destinationJson),
+          destination,
           travelMode: "DRIVE",
           routingPreference: "TRAFFIC_AWARE",
         }),
@@ -152,59 +183,83 @@ async function googleDriveSeconds(
   }
 }
 
-// Shared across serverless instances, keyed by (destination, 10-minute slot).
-const cachedGoogle = unstable_cache(googleDriveSeconds, ["drive-live-v1"], {
-  revalidate: 3600,
-});
+// Per-instance record of the attempt made in each slot: collapses concurrent
+// requests into one call and stops this instance asking twice in a slot even if
+// the shared cache is unavailable.
+const attempts = new Map<string, Promise<Measurement | null>>();
 
-// Per-instance memo in front of the shared cache (saves a cache round-trip on
-// every request within a slot, and collapses concurrent lookups).
-const memo = new Map<string, Promise<number | null>>();
-
-function liveSeconds(key: string, destination: Destination): Promise<number | null> {
-  const slot = Math.floor(Date.now() / SLOT_MS); // real time, never a `?now=` override
-  const k = `${key}:${slot}`;
-  let p = memo.get(k);
+/**
+ * Take one measurement for this slot — unless this or another instance already
+ * tried in it, in which case return whatever that attempt left behind.
+ */
+function measureOnce(
+  key: string,
+  destination: Destination,
+  slotMs: number
+): Promise<Measurement | null> {
+  const now = Date.now(); // real time, never a `?now=` override
+  const slotKey = `tried:${key}:${slotMs}:${Math.floor(now / slotMs)}`;
+  let p = attempts.get(slotKey);
   if (!p) {
-    p = cachedGoogle(key, JSON.stringify(destination), slot).catch(() => null);
-    memo.set(k, p);
-    for (const old of memo.keys()) {
-      if (!old.endsWith(`:${slot}`)) memo.delete(old);
+    p = (async () => {
+      if (await cacheGet(slotKey)) return readLast(key); // another instance has this slot
+      await cacheSet(slotKey, 1, Math.ceil(slotMs / 1000));
+      const sec = await googleDriveSeconds(key, destination);
+      if (sec == null) return null;
+      const m: Measurement = { sec, at: now };
+      await cacheSet(`last:${key}`, m, KEEP_S);
+      return m;
+    })();
+    attempts.set(slotKey, p);
+    for (const old of attempts.keys()) {
+      if (old.startsWith(`tried:${key}:`) && old !== slotKey) attempts.delete(old);
     }
   }
   return p;
 }
 
-// --- public API ---------------------------------------------------------------
+// --- public API -----------------------------------------------------------------
+
+const toEstimate = (m: Measurement, now: number): DriveEstimate => ({
+  sec: m.sec,
+  source: now - m.at <= LIVE_MAX_AGE_MS ? "live" : "earlier",
+  measuredAt: m.at,
+});
 
 async function estimate(
   key: string,
   destination: Destination,
-  wantLive: boolean
+  allowGoogle: boolean
 ): Promise<DriveEstimate | null> {
-  if (wantLive && liveTrafficConfigured()) {
-    const sec = await liveSeconds(key, destination);
-    if (sec != null) return { sec, source: "live" };
+  const now = Date.now();
+  const last = await readLast(key);
+  const live = inLiveTrafficHours(now);
+  const freshEnough =
+    !!last && now - last.at < (live ? SLOT_MS : OFF_HOURS_MAX_AGE_MS);
+
+  if (!freshEnough && allowGoogle && liveTrafficConfigured()) {
+    const m = await measureOnce(key, destination, live ? SLOT_MS : OFF_HOURS_SLOT_MS);
+    if (m) return toEstimate(m, now);
   }
-  const typicalMin = parseTypical(process.env.DRIVE_TYPICAL_MIN).get(key.toLowerCase());
-  return typicalMin != null ? { sec: Math.round(typicalMin * 60), source: "typical" } : null;
+  // No new measurement: keep showing the last real one, however old, marked as such.
+  return last ? toEstimate(last, now) : null;
 }
 
 /**
- * Drive time home -> a lat/lon point (e.g. a train station). `wantLive` asks
- * for live traffic if it's configured; otherwise (or on failure) the typical
- * time is returned. Null means no estimate at all is configured.
+ * Drive time home -> a lat/lon point (e.g. a train station). `allowGoogle`
+ * false (a test clock) never calls Google but may still return the last
+ * measurement. Null means Google has never given us a figure.
  */
 export function driveTo(
   key: string,
   dest: LatLon | undefined,
-  wantLive: boolean
+  allowGoogle: boolean
 ): Promise<DriveEstimate | null> {
-  if (!dest) return estimate(key, { address: "" }, false);
+  if (!dest) return Promise.resolve(null);
   return estimate(
     key,
     { location: { latLng: { latitude: dest.lat, longitude: dest.lon } } },
-    wantLive
+    allowGoogle
   );
 }
 
@@ -212,12 +267,12 @@ export function driveTo(
 export function driveToAddress(
   key: string,
   address: string,
-  wantLive: boolean
+  allowGoogle: boolean
 ): Promise<DriveEstimate | null> {
-  return estimate(key, { address }, wantLive);
+  return estimate(key, { address }, allowGoogle);
 }
 
-/** Test hook: forget the per-instance memo. */
+/** Test hook: forget this instance's in-memory state (the shared cache is untouched). */
 export function _resetForTests(): void {
-  memo.clear();
+  attempts.clear();
 }
