@@ -1,14 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  json,
-  mockNextCache,
-  mockVercelFunctions,
-  runtimeCache,
-  sharedCache,
-  stubFetch,
-} from "./helpers";
+import { json, mockVercelFunctions, runtimeCache, stubFetch } from "./helpers";
 
-vi.mock("next/cache", () => mockNextCache());
 vi.mock("@vercel/functions", () => mockVercelFunctions());
 
 import bundled from "@/data/schedule.json";
@@ -46,7 +38,6 @@ beforeEach(() => {
   seedDriveTimes({ "92": 16, "18": 10, commute: 15 });
   delete process.env.NJT_API_USERNAME;
   delete process.env.NJT_API_PASSWORD;
-  sharedCache.clear();
   resetNjt();
   resetDrive();
   vi.spyOn(console, "warn").mockImplementation(() => {});

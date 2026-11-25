@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { mockNextCache } from "./helpers";
+import { mockVercelFunctions } from "./helpers";
 
-vi.mock("next/cache", () => mockNextCache());
+vi.mock("@vercel/functions", () => mockVercelFunctions());
 
 import { buildBoard, type BuildBoardOpts } from "@/lib/board";
 import { parseNjtDate, parseStationBoard, type LiveTrain } from "@/lib/njtransit";

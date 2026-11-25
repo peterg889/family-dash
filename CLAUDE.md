@@ -61,9 +61,12 @@ NJT quirks: `SEC_LATE` of `-60` is a "no estimate yet" sentinel (not early); a
 blank `STATUS` is normal; `TRACK` "Single" (Gladstone branch) is not surfaced;
 a rejected token is HTTP 500 `{"errorMessage":"Invalid token."}`.
 
-**Login budget:** `getToken` is capped at ~5/day. Tokens are cached in Next's
-Data Cache keyed by (service day, attempt); only an explicit "Invalid token"
-advances the attempt, max 3/day. A timeout or 5xx must never trigger a login.
+**Login budget:** `getToken` is capped at ~5/day. One token lives in Vercel's
+Runtime Cache (`getCache()` — shared across instances *and deployments*; Next's
+`unstable_cache` keys change with every build, which cost a login per deploy)
+and is reused until the API explicitly says "Invalid token". Logins are counted
+per day in the same cache, max 3/day; a timeout or 5xx must never trigger a
+login, and a deployed instance without the shared cache refuses to log in.
 When testing by hand, mint once and reuse the token — don't loop on `getToken`.
 
 ## Timetable

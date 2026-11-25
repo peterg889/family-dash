@@ -1,7 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { json, mockNextCache, sharedCache, stubFetch, utc } from "./helpers";
+import {
+  json,
+  mockVercelFunctions,
+  runtimeCache,
+  runtimeCacheState,
+  stubFetch,
+  utc,
+} from "./helpers";
 
-vi.mock("next/cache", () => mockNextCache());
+vi.mock("@vercel/functions", () => mockVercelFunctions());
 
 import {
   _resetForTests,
@@ -25,12 +32,14 @@ const dataCalls = (calls: { url: string }[]) => calls.filter((c) => !c.url.endsW
 beforeEach(() => {
   process.env.NJT_API_USERNAME = "user";
   process.env.NJT_API_PASSWORD = "pass";
-  sharedCache.clear();
+  runtimeCache.clear();
+  runtimeCacheState.broken = false;
   _resetForTests();
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "info").mockImplementation(() => {});
 });
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -145,13 +154,53 @@ describe("fetchStationBoard — the 5-logins-a-day budget", () => {
     expect(logins(calls)).toBe(3);
   });
 
-  it("shares the day's token across serverless instances", async () => {
+  it("shares one token across server instances and deployments", async () => {
     const calls = stubFetch((url) => (url.endsWith("/getToken") ? json({ Authenticated: "True", UserToken: "t0" }) : json(board())));
     await fetchStationBoard("MR");
-    _resetForTests(); // a cold start: in-memory state gone, shared cache intact
+    _resetForTests(); // a cold start or a new deployment: memory gone, shared cache intact
     await fetchStationBoard("MR");
     expect(logins(calls)).toBe(1);
     expect(dataCalls(calls)).toBe(2);
+  });
+
+  it("keeps using the same token on later days — no daily login", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(utc(2026, 12, 2, 12));
+    const calls = stubFetch((url) => (url.endsWith("/getToken") ? json({ Authenticated: "True", UserToken: "t0" }) : json(board())));
+    await fetchStationBoard("MR");
+    for (const day of [3, 4, 9]) {
+      vi.setSystemTime(utc(2026, 12, day, 12));
+      _resetForTests();
+      expect(await fetchStationBoard("MR")).toHaveLength(1);
+    }
+    expect(logins(calls)).toBe(1);
+  });
+
+  it("gets a fresh budget the next day", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(utc(2026, 12, 2, 12));
+    let n = 0;
+    let accept = false;
+    const calls = stubFetch((url) => {
+      if (url.endsWith("/getToken")) return json({ Authenticated: "True", UserToken: `t${n++}` });
+      return accept ? json(board()) : INVALID_TOKEN();
+    });
+    expect(await fetchStationBoard("MR")).toBeNull(); // burns today's three
+    expect(logins(calls)).toBe(3);
+    vi.setSystemTime(utc(2026, 12, 3, 12));
+    _resetForTests();
+    accept = true;
+    expect(await fetchStationBoard("MR")).toHaveLength(1);
+    expect(logins(calls)).toBe(4);
+  });
+
+  it("does not log in at all if the shared cache is unavailable", async () => {
+    runtimeCacheState.broken = true;
+    const calls = stubFetch((url) => (url.endsWith("/getToken") ? json({ Authenticated: "True", UserToken: "t0" }) : json(board())));
+    expect(await fetchStationBoard("MR")).toBeNull();
+    _resetForTests();
+    expect(await fetchStationBoard("BV")).toBeNull();
+    expect(calls).toHaveLength(0);
   });
 
   it("stops trying to log in for a while after a failed login", async () => {
@@ -160,6 +209,19 @@ describe("fetchStationBoard — the 5-logins-a-day budget", () => {
     expect(await fetchStationBoard("BV")).toBeNull();
     expect(logins(calls)).toBe(1);
     expect(dataCalls(calls)).toBe(0);
+  });
+
+  it("does not log in on a deployed instance that lacks the shared cache", async () => {
+    // On Vercel the library would silently fall back to per-instance memory —
+    // and every cold start would log in. Refuse instead.
+    process.env.VERCEL_ENV = "production";
+    try {
+      const calls = stubFetch((url) => (url.endsWith("/getToken") ? json({ Authenticated: "True", UserToken: "t0" }) : json(board())));
+      expect(await fetchStationBoard("MR")).toBeNull();
+      expect(calls).toHaveLength(0);
+    } finally {
+      delete process.env.VERCEL_ENV;
+    }
   });
 
   it("makes no calls at all without credentials", async () => {

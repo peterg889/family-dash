@@ -1,33 +1,12 @@
 import { vi } from "vitest";
 
 /**
- * Stand-in for Next's Data Cache: `unstable_cache(fn, keyParts)` memoizes by
- * (keyParts, args) for the life of the store — like the real shared cache, a
- * thrown error is not cached. Tests share one store so they can model several
- * serverless instances reading the same cache.
- */
-export const sharedCache = new Map<string, unknown>();
-
-export function mockNextCache() {
-  return {
-    unstable_cache:
-      <A extends unknown[], R>(fn: (...args: A) => Promise<R>, keyParts: string[] = []) =>
-      async (...args: A): Promise<R> => {
-        const k = JSON.stringify([keyParts, args]);
-        if (sharedCache.has(k)) return sharedCache.get(k) as R;
-        const v = await fn(...args);
-        sharedCache.set(k, v);
-        return v;
-      },
-    revalidateTag: () => {},
-  };
-}
-
-/**
  * Stand-in for Vercel's Runtime Cache (`getCache()` from @vercel/functions): a
  * plain key-value store with TTLs, shared by every "instance" in a test.
  */
 export const runtimeCache = new Map<string, { value: unknown; expires: number }>();
+/** Set true to make every cache call throw, as if the cache service were down. */
+export const runtimeCacheState = { broken: false };
 
 export function mockVercelFunctions() {
   return {
@@ -35,11 +14,13 @@ export function mockVercelFunctions() {
       const k = (key: string) => `${opts?.namespace ?? ""}$${key}`;
       return {
         get: async (key: string) => {
+          if (runtimeCacheState.broken) throw new Error("cache down");
           const e = runtimeCache.get(k(key));
           if (!e || e.expires <= Date.now()) return null;
           return e.value;
         },
         set: async (key: string, value: unknown, o?: { ttl?: number }) => {
+          if (runtimeCacheState.broken) throw new Error("cache down");
           runtimeCache.set(k(key), {
             value,
             expires: o?.ttl ? Date.now() + o.ttl * 1000 : Infinity,

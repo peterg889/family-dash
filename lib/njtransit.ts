@@ -23,12 +23,12 @@
  * API fails — the board must keep working on the timetable alone.
  *
  * Limits that shape this file: board calls are capped at 40,000/day (generous),
- * but getToken is capped at about FIVE per day. So a token is minted at most a
- * few times per day, shared across serverless instances, and — critically — a
- * timeout or a 5xx is never mistaken for "the token is bad".
+ * but getToken is capped at about FIVE per day. So one token is shared by every
+ * server instance and every deployment, reused until the API rejects it, and —
+ * critically — a timeout or a 5xx is never mistaken for "the token is bad".
  */
 
-import { unstable_cache } from "next/cache";
+import { getCache } from "@vercel/functions";
 import { nyWallToEpoch } from "./departures";
 
 const BASE =
@@ -192,16 +192,17 @@ async function postForm(
 // --- token auth --------------------------------------------------------------
 //
 // getToken is capped at ~5 calls/day, so the budget is designed in rather than
-// hoped for: tokens live in Next's Data Cache (shared across serverless
-// instances and cold starts) under a key of (service day, attempt number).
-// Attempt 0 is the day's token. Only when the API explicitly rejects it do we
-// move to attempt 1, then 2 — and then stop until tomorrow. Worst case that is
-// MAX_TOKENS_PER_DAY mints; a normal day is one.
+// hoped for. The token lives in Vercel's Runtime Cache — shared by every server
+// instance and, unlike Next's Data Cache, kept across deployments — and is
+// reused until the API explicitly rejects it. Logins are counted per day in the
+// same cache and stop at MAX_TOKENS_PER_DAY; a normal day needs none.
 
 const MAX_TOKENS_PER_DAY = 3;
 const MINT_BACKOFF_MS = 15 * 60_000; // after a failed login, don't retry on this instance for a while
+const TOKEN_KEEP_S = 30 * 24 * 3600; // reuse a token until it is rejected
+const store = () => getCache({ namespace: "njt" });
 
-/** Token "day": rolls over at 3 AM New York, when almost nothing is running. */
+/** Budget "day": rolls over at 3 AM New York, when almost nothing is running. */
 function tokenDay(nowMs: number): string {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/New_York",
@@ -211,9 +212,49 @@ function tokenDay(nowMs: number): string {
   }).format(new Date(nowMs - 3 * 3600_000));
 }
 
-// Mint a brand-new token. Throws on missing creds / failed auth so a bad result
-// is never written to the cache. The arguments only form the cache key.
-async function mintToken(day: string, attempt: number): Promise<string> {
+/**
+ * Off Vercel (local dev, tests) @vercel/functions quietly uses a per-process
+ * in-memory cache, which is fine there. But if that ever happened on a deployed
+ * instance, every cold start would think it had no token and log in — exactly
+ * what the budget can't afford. So on Vercel, insist on the real shared cache.
+ */
+function sharedCacheAvailable(): boolean {
+  const env = process.env.VERCEL_ENV;
+  if (env !== "production" && env !== "preview") return true;
+  const ctx = (globalThis as Record<symbol, { get?: () => { cache?: unknown } } | undefined>)[
+    Symbol.for("@vercel/request-context")
+  ]?.get?.();
+  return (
+    !!ctx?.cache ||
+    (!!process.env.RUNTIME_CACHE_ENDPOINT && !!process.env.RUNTIME_CACHE_HEADERS)
+  );
+}
+
+// Reads tell "nothing stored" apart from "the cache itself failed": without the
+// cache we can't know what other instances have done, and must not log in.
+type Read<T> = { ok: true; value: T | null } | { ok: false };
+
+async function storeGet<T>(key: string): Promise<Read<T>> {
+  if (!sharedCacheAvailable()) return { ok: false };
+  try {
+    return { ok: true, value: ((await store().get(key)) as T | null | undefined) ?? null };
+  } catch {
+    return { ok: false };
+  }
+}
+
+async function storeSet(key: string, value: unknown, ttlSeconds: number): Promise<boolean> {
+  if (!sharedCacheAvailable()) return false;
+  try {
+    await store().set(key, value, { ttl: ttlSeconds, name: `njt:${key}` });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Mint a brand-new token. Throws on missing creds / failed auth.
+async function mintToken(): Promise<string> {
   const username = process.env.NJT_API_USERNAME;
   const password = process.env.NJT_API_PASSWORD;
   if (!username || !password) throw new Error("njt: missing credentials");
@@ -226,50 +267,46 @@ async function mintToken(day: string, attempt: number): Promise<string> {
       `njt: login failed (${res.kind === "fail" ? res.why : res.kind === "auth" ? "rejected" : "not authenticated"})`
     );
   }
-  console.info(`[njt] minted token for ${day} (attempt ${attempt})`);
   return token;
 }
 
-const cachedMint = unstable_cache(mintToken, ["njt-token-v2"], {
-  revalidate: 36 * 3600, // outlives its day, so it is never re-minted in the background
-});
-
-type Token = { token: string; day: string; attempt: number };
-
-let tokenMemo: Token | null = null;
-let attemptForDay: { day: string; attempt: number } = { day: "", attempt: 0 };
+let tokenMemo: string | null = null; // this instance's current token
+const rejectedTokens = new Set<string>(); // tokens the API has refused
 let mintBackoffUntil = 0;
-const tokenInFlight = new Map<string, Promise<string>>();
+let tokenInFlight: Promise<string | null> | null = null;
 
 export function hasCredentials(): boolean {
   return !!(process.env.NJT_API_USERNAME && process.env.NJT_API_PASSWORD);
 }
 
-/** The token to use right now, or null (no creds / login failing / day's budget spent). */
-async function getToken(): Promise<Token | null> {
-  if (!hasCredentials()) return null;
-  const day = tokenDay(Date.now());
-  if (attemptForDay.day !== day) attemptForDay = { day, attempt: 0 };
-  const attempt = attemptForDay.attempt;
-  if (attempt >= MAX_TOKENS_PER_DAY) return null;
-
-  if (tokenMemo && tokenMemo.day === day && tokenMemo.attempt === attempt) {
-    return tokenMemo;
+async function findOrMintToken(): Promise<string | null> {
+  const stored = await storeGet<{ token: string }>("token");
+  if (!stored.ok) {
+    console.warn("[njt] token cache unavailable — not logging in");
+    return null;
   }
+  const have = stored.value?.token;
+  if (have && !rejectedTokens.has(have)) return have;
+
+  // No usable token anywhere: log in, if today's budget allows.
   if (Date.now() < mintBackoffUntil) return null;
-
-  // Collapse concurrent lookups (the station boards refresh in parallel) into
-  // one cache read — and so at most one login.
-  const key = `${day}:${attempt}`;
-  let p = tokenInFlight.get(key);
-  if (!p) {
-    p = cachedMint(day, attempt).finally(() => tokenInFlight.delete(key));
-    tokenInFlight.set(key, p);
+  const day = tokenDay(Date.now());
+  const used = await storeGet<number>(`logins:${day}`);
+  if (!used.ok) return null;
+  const count = used.value ?? 0;
+  if (count >= MAX_TOKENS_PER_DAY) {
+    console.warn(`[njt] daily login budget spent (${count}) — live status off until tomorrow`);
+    mintBackoffUntil = Date.now() + MINT_BACKOFF_MS;
+    return null;
   }
+  // Count the attempt before making it, so a failing login can't be repeated
+  // by every instance.
+  if (!(await storeSet(`logins:${day}`, count + 1, 48 * 3600))) return null;
   try {
-    const token = await p;
-    tokenMemo = { token, day, attempt };
-    return tokenMemo;
+    const token = await mintToken();
+    await storeSet("token", { token, mintedAt: Date.now() }, TOKEN_KEEP_S);
+    console.info(`[njt] logged in (login ${count + 1} of ${MAX_TOKENS_PER_DAY} allowed for ${day})`);
+    return token;
   } catch (e) {
     mintBackoffUntil = Date.now() + MINT_BACKOFF_MS;
     console.warn(`[njt] ${e instanceof Error ? e.message : "login failed"}`);
@@ -277,16 +314,33 @@ async function getToken(): Promise<Token | null> {
   }
 }
 
-/** The API explicitly rejected `tok`: move this instance on to the next attempt. */
-function tokenRejected(tok: Token): void {
-  if (attemptForDay.day === tok.day && attemptForDay.attempt === tok.attempt) {
-    attemptForDay = { day: tok.day, attempt: tok.attempt + 1 };
-    console.warn(
-      `[njt] token for ${tok.day} (attempt ${tok.attempt}) was rejected` +
-        (tok.attempt + 1 >= MAX_TOKENS_PER_DAY
-          ? " — daily login budget spent, live status off until tomorrow"
-          : "")
-    );
+/** The token to use right now, or null (no creds / login failing / day's budget spent). */
+async function getToken(): Promise<string | null> {
+  if (!hasCredentials()) return null;
+  if (tokenMemo) return tokenMemo;
+  // Collapse concurrent lookups (the station boards refresh in parallel) into
+  // one cache read — and so at most one login.
+  if (!tokenInFlight) {
+    tokenInFlight = findOrMintToken().finally(() => {
+      tokenInFlight = null;
+    });
+  }
+  const token = await tokenInFlight;
+  if (token) tokenMemo = token;
+  return token;
+}
+
+/** The API explicitly rejected `token`: stop using it, here and on other instances. */
+async function tokenRejected(token: string): Promise<void> {
+  if (rejectedTokens.has(token)) return;
+  rejectedTokens.add(token);
+  if (tokenMemo === token) tokenMemo = null;
+  console.warn("[njt] token was rejected by the API");
+  try {
+    const stored = await storeGet<{ token: string }>("token");
+    if (stored.ok && stored.value?.token === token) await store().delete("token");
+  } catch {
+    // ignore — the rejected set keeps this instance off it regardless
   }
 }
 
@@ -417,12 +471,12 @@ export async function fetchStationBoard(
     const res = await postForm(
       variant === "full" ? "getTrainSchedule" : "getTrainSchedule19Rec",
       variant === "full"
-        ? { token: tok.token, station: station2char }
-        : { token: tok.token, station: station2char, line: "" }
+        ? { token: tok, station: station2char }
+        : { token: tok, station: station2char, line: "" }
     );
     if (res.kind === "auth") {
-      tokenRejected(tok);
-      continue; // try the day's next token, if any budget is left
+      await tokenRejected(tok);
+      continue; // try a fresh token, if the day's budget allows
     }
     if (res.kind === "fail") return fail(res.why);
 
@@ -524,8 +578,8 @@ export function matchLiveStatus(
 /** Test hook: forget all in-memory state (tokens, boards, back-offs). */
 export function _resetForTests(): void {
   tokenMemo = null;
-  attemptForDay = { day: "", attempt: 0 };
+  rejectedTokens.clear();
   mintBackoffUntil = 0;
-  tokenInFlight.clear();
+  tokenInFlight = null;
   boardCache.clear();
 }
