@@ -23,6 +23,35 @@ export function mockNextCache() {
   };
 }
 
+/**
+ * Stand-in for Vercel's Runtime Cache (`getCache()` from @vercel/functions): a
+ * plain key-value store with TTLs, shared by every "instance" in a test.
+ */
+export const runtimeCache = new Map<string, { value: unknown; expires: number }>();
+
+export function mockVercelFunctions() {
+  return {
+    getCache: (opts?: { namespace?: string }) => {
+      const k = (key: string) => `${opts?.namespace ?? ""}$${key}`;
+      return {
+        get: async (key: string) => {
+          const e = runtimeCache.get(k(key));
+          if (!e || e.expires <= Date.now()) return null;
+          return e.value;
+        },
+        set: async (key: string, value: unknown, o?: { ttl?: number }) => {
+          runtimeCache.set(k(key), {
+            value,
+            expires: o?.ttl ? Date.now() + o.ttl * 1000 : Infinity,
+          });
+        },
+        delete: async (key: string) => void runtimeCache.delete(k(key)),
+        expireTag: async () => {},
+      };
+    },
+  };
+}
+
 export type Call = { url: string; body: string };
 
 /** Install a fake global fetch; `handler` gets (url, bodyText) and returns a Response or throws. */

@@ -110,17 +110,17 @@ static void build_next_morning(BoardData& data, time_t now) {
   data.nBoards = 3;
   const long H = 3600;
 
-  board(data.boards[0], "Morristown", "Penn", 16, DRIVE_TYPICAL);
+  board(data.boards[0], "Morristown", "Penn", 16, DRIVE_EARLIER);
   data.boards[0].nDeps = 3;
   mk(data.boards[0].deps[0], now, 9 * H + 1020, 9 * H + 2280, 13 * H + 240);
   mk(data.boards[0].deps[1], now, 9 * H + 2700, 10 * H + 360, 14 * H + 900);
   mk(data.boards[0].deps[2], now, 10 * H + 900, 10 * H + 2160, 15 * H + 300);
 
-  board(data.boards[1], "Bernardsville", "Penn", 9, DRIVE_TYPICAL);
+  board(data.boards[1], "Bernardsville", "Penn", 9, DRIVE_EARLIER);
   data.boards[1].nDeps = 1;
   mk(data.boards[1].deps[0], now, 9 * H + 2460, 9 * H + 3300, 14 * H + 600);
 
-  board(data.boards[2], "Bernardsville", "Hoboken", 9, DRIVE_TYPICAL);
+  board(data.boards[2], "Bernardsville", "Hoboken", 9, DRIVE_EARLIER);
   data.boards[2].nDeps = 2;
   mk(data.boards[2].deps[0], now, 9 * H + 1260, 9 * H + 2100, 13 * H + 1200);
   mk(data.boards[2].deps[1], now, 10 * H + 600, 10 * H + 1440, 14 * H + 2400);
@@ -151,7 +151,7 @@ static const Scenario SCENARIOS[] = {
     {"hour-plus", 10, 40, "hero more than an hour away"},
     {"cancelled-first", 7, 5, "first train cancelled: hero is the next one"},
     {"all-cancelled", 7, 5, "every listed train cancelled"},
-    {"typical-drive", 7, 5, "drive time is a typical figure (~16 min)"},
+    {"earlier-drive", 7, 5, "drive time is an earlier measurement (~16 min)"},
     {"no-drive-time", 7, 5, "leave board without a drive estimate"},
     {"live-down", 7, 5, "NJ Transit real-time feed failed: schedule only"},
     {"stale-footer", 7, 5, "board 14 min old"},
@@ -246,9 +246,9 @@ int main(int argc, char** argv) {
     for (int i = 0; i < data.nBoards; i++)
       for (int j = 0; j < data.boards[i].nDeps; j++)
         lv(data.boards[i].deps[j], LIVE_CANCELLED, 0, "");
-  } else if (!strcmp(s, "typical-drive")) {
+  } else if (!strcmp(s, "earlier-drive")) {
     for (int i = 0; i < data.nBoards; i++)
-      data.boards[i].driveSource = DRIVE_TYPICAL;
+      data.boards[i].driveSource = DRIVE_EARLIER;
   } else if (!strcmp(s, "no-drive-time")) {
     for (int i = 0; i < data.nBoards; i++) {
       data.boards[i].driveMin = 0;

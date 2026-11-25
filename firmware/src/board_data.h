@@ -36,8 +36,9 @@ enum LiveFeed : uint8_t {
 // Where a board's drive time came from (`driveSource`).
 enum DriveSource : uint8_t {
   DRIVE_NONE = 0,  // no drive estimate at all
-  DRIVE_LIVE,      // traffic-aware, measured now
-  DRIVE_TYPICAL,   // a fixed typical figure — drawn as "~16 min drive"
+  DRIVE_LIVE,      // traffic-aware, measured in the last few minutes
+  DRIVE_EARLIER,   // Google's most recent measurement, not from the last few
+                   // minutes — drawn as "~16 min drive"
 };
 
 struct DepView {

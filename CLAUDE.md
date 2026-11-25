@@ -13,7 +13,7 @@ Family Dashboard — an NJ Transit "next trains" board with two front-ends:
 
 Deploy: `main` is the production branch (Vercel git integration). Push to `main`
 → auto-deploys → `family-dash-beta`. Secrets and anything private live in Vercel
-env, never in the repo or on the device: `HOME_ADDRESS`, `DRIVE_TYPICAL_MIN`,
+env, never in the repo or on the device: `HOME_ADDRESS`,
 `GOOGLE_MAPS_API_KEY`, `NJT_API_USERNAME` / `NJT_API_PASSWORD` (see
 `.env.example`). Production values are "sensitive" (unreadable); the
 *development* environment has readable copies — `vercel env pull .env.local`
@@ -78,23 +78,28 @@ The service day is anchored at GTFS "noon − 12h" (not local midnight) — that
 what keeps the two daylight-saving Sundays right; `tests/departures.test.ts`
 pins it.
 
-## Drive times ("typical first")
+## Drive times (measured by Google, never guessed)
 
-`lib/driving.ts`: `DRIVE_TYPICAL_MIN` (e.g. `92=16,18=10,commute=15`) gives every
-train a leave-by with no outside dependency. Live Google Routes traffic is an
-optional refinement — asked only for today's outbound boards during
-`DRIVE_LIVE_HOURS` (default 5–11 NY), once per destination per 10-minute slot
-via the shared cache (≤ ~108 calls/day). Any failure falls back to typical and
-logs the reason. The API marks each board `driveSource: "live" | "typical"`;
-screens show typical as "~16 min". The home address is only ever sent to Google
-and is never in the API response.
+The owner wants drive times accurate or absent — **do not add hand-typed or
+"typical" fallbacks.** `lib/driving.ts`: every figure is a Google Routes
+traffic-aware measurement. During `DRIVE_LIVE_HOURS` (default 6–8 AM NY) each
+destination is re-measured about every 5 minutes; outside them nothing is
+measured and the most recent measurement is shown (one is taken off-hours only
+if the last is over ~26 h old or missing). ≤ 72 Google calls/day. Measurements
+and the one-attempt-per-slot guard live in Vercel's Runtime Cache
+(`getCache()` from `@vercel/functions`), shared across instances. The API marks
+each board `driveSource: "live" | "earlier"` plus `driveMeasuredAtMs`; screens
+show earlier as "~16 min". If Google has never answered there is no drive time
+and no leave-by, and the screens say "no drive time". Failures log
+`[drive] Google Routes failed … <reason>`. The home address is only ever sent to
+Google and is never in the API response.
 
 ## API contract (`/api/departures`)
 
 `mode` (`morning` | `evening` | `next-morning`), `showLeave`, `headline`,
 `status: { schedule: {validThrough, daysLeft, expired}, live: ok|down|off,
-drive: live|typical|none|off }`, `commute`, and `boards[]` each with
-`driveMin`, `driveSource`, `source` and `departures[]` (`depEpochMs`,
+drive: live|earlier|none|off }`, `commute`, and `boards[]` each with
+`driveMin`, `driveSource`, `driveMeasuredAtMs`, `source` and `departures[]` (`depEpochMs`,
 `arrEpochMs`, `leaveByEpochMs`, `train`, `source: live|schedule`, `live`).
 `?now=<epochMs>` overrides the clock for testing; it never touches live data
 and is never cached. Responses are edge-cached for 15 s.
@@ -118,7 +123,8 @@ See `firmware/README.md` for the full board spec, pinout, and gotchas. Key facts
   `showLeave` from the server — not the presence of a leave time — decides
   LEAVE IN vs TRAIN DEPARTS IN, and a missing drive time is called out; a
   cancelled train is never the hero; trains on a later day read
-  "TOMORROW • LEAVE AT 6:32am"; a typical drive time is drawn "~16 min drive".
+  "TOMORROW • LEAVE AT 6:32am"; an earlier (not just-measured) drive time is
+  drawn "~16 min drive".
   The bottom band reports degraded data: "updated 14 min ago" (>6 min),
   an inverted "OFFLINE since 9:41a" banner (>30 min), "schedule only — no live
   status", "timetable out of date". It never shows "no trains" when the real

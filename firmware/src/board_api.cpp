@@ -85,7 +85,8 @@ bool board_fetch(BoardData& out, time_t now, bool clock_valid) {
     strlcpy(bv.destShort, b["destShort"] | "", sizeof(bv.destShort));
     bv.driveMin = b["driveMin"] | 0;
     const char* src = b["driveSource"] | "";
-    if (!strcmp(src, "typical")) bv.driveSource = DRIVE_TYPICAL;
+    if (!strcmp(src, "earlier") || !strcmp(src, "typical"))
+      bv.driveSource = DRIVE_EARLIER;
     else if (!strcmp(src, "live")) bv.driveSource = DRIVE_LIVE;
     else  // older server: any drive time it sent was a live one
       bv.driveSource = bv.driveMin > 0 ? DRIVE_LIVE : DRIVE_NONE;

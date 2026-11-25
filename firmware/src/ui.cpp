@@ -356,7 +356,7 @@ static void draw_subline(GFXcanvas1& c, const BoardData& data,
   if (b && b->driveMin > 0) {
     char txt[24];
     snprintf(txt, sizeof(txt), "%s%d min drive",
-             b->driveSource == DRIVE_TYPICAL ? "~" : "", b->driveMin);
+             b->driveSource == DRIVE_EARLIER ? "~" : "", b->driveMin);
     draw_right(c, &FreeSans9pt7b, RIGHT, Y_SUB, INK, txt);
   } else if (b) {
     draw_tag(c, RIGHT, Y_SUB, "no drive time");

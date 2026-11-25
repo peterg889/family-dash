@@ -47,22 +47,24 @@ the repo. See `.env.example`.
 
 | Variable | What it does |
 | --- | --- |
-| `DRIVE_TYPICAL_MIN` | Typical drive minutes per destination, e.g. `92=16,18=10,commute=15`. This is what "leave by" uses by default. |
-| `HOME_ADDRESS` | Where drives start. Only ever sent to Google for live traffic; never in the API response. |
-| `GOOGLE_MAPS_API_KEY` | Enables live traffic (Google Routes API). |
-| `DRIVE_LIVE_HOURS` | New York hours in which to ask for live traffic. Default `5-11`. |
+| `HOME_ADDRESS` | Where drives start. Only ever sent to Google to measure drive times; never in the API response. |
+| `GOOGLE_MAPS_API_KEY` | A Google Cloud API key with the **Routes API** enabled (billing on). Needed for drive times and "leave by". |
+| `DRIVE_LIVE_HOURS` | New York hours in which drive times are re-measured. Default `6-8`. |
 | `NJT_API_USERNAME` / `NJT_API_PASSWORD` | NJ Transit RailData credentials — enables the live board. |
 
-### Drive times: typical first, live when it matters
+### Drive times: measured by Google, never guessed
 
-Each destination has a **typical** drive time you set once. That alone gives
-every train a "leave by", with nothing that can fail. **Live traffic** is an
-optional refinement: if a Google key is configured, the server asks Google at
-most once per destination per 10 minutes, and only during the morning hours
-when someone is about to leave — about 100 calls a day at most, however many
-screens are open. If Google is unconfigured, down, or the key stops working,
-the board uses the typical time and marks it with a `~` ("~16 min drive"). The
-reason for any Google failure is logged.
+Every drive time is a real traffic-aware measurement from the Google Routes
+API. During the morning hours when someone is about to leave (6–8 AM by
+default) each destination is re-measured about every 5 minutes. The rest of the
+day nothing is measured: the board keeps showing the most recent measurement and
+marks it with a `~` ("~16 min drive"). That is 72 Google calls a day at most,
+however many screens are open.
+
+If Google can't be reached, the last measurement keeps being shown (marked `~`)
+and the reason is logged. If Google has never answered — no key, or a key that
+doesn't work — there is no drive time and no "leave by", and both screens say so
+rather than guessing.
 
 ### Live trains
 
@@ -104,6 +106,7 @@ Edit the `ORIGINS` / `DESTINATIONS` maps at the top of
 
 `npm test` covers the timetable logic (including both daylight-saving days), the
 live-board merge against real captured NJ Transit data, the login budget, the
-drive-time fallbacks, and that the API never leaks the home address.
+drive-time schedule and its Google-call budget, and that the API never leaks the
+home address.
 `.github/workflows/ci.yml` runs them, the type check, the production build, a
 firmware compile, and renders every E-Ink screen state on each push.
