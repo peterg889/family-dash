@@ -1,5 +1,6 @@
 // firmware/src/net.h — minimal WiFi lifecycle for the E-Paper board.
-// WiFi's only purpose here is NTP time sync; see timekeeper.{h,cpp}.
+// WiFi carries everything the board shows: the board fetch (board_api.cpp),
+// NTP time (timekeeper.cpp) and over-the-air updates (ota.cpp).
 #pragma once
 
 #include <stdint.h>
@@ -18,3 +19,4 @@ void net_tick(void);
 net_state_t net_state(void);
 const char* net_ssid(void);
 const char* net_ip(void);  // "---" until associated
+int net_rssi(void);        // dBm, 0 when not associated

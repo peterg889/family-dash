@@ -1,21 +1,25 @@
 import { NextResponse } from "next/server";
 import {
-  nextDepartures,
   STATION_NAMES,
   STATION_COORDS,
   SCHEDULE_GENERATED_AT,
+  scheduleStatus,
   type DayFilter,
 } from "@/lib/departures";
 import {
-  driveSecondsTo,
-  driveSecondsToAddress,
-  HOME_ADDRESS,
+  driveTo,
+  driveToAddress,
+  inLiveTrafficHours,
+  type DriveEstimate,
 } from "@/lib/driving";
 import {
-  fetchLiveBoards,
-  matchLiveStatus,
+  fetchStationBoards,
+  hasCredentials,
+  NJT_STATION_2CHAR,
+  type BoardVariant,
   type LiveTrain,
 } from "@/lib/njtransit";
+import { buildBoard } from "@/lib/board";
 
 export const dynamic = "force-dynamic";
 
@@ -42,6 +46,9 @@ const INBOUND: BoardDef[] = [
   { origin: "63", dest: "18", short: "Bernardsville" }, // Hoboken -> Bernardsville
 ];
 
+// The stations we live near; their live boards cover both directions.
+const HOME_STATIONS = new Set(["92", "18"]);
+
 const TRAINS_PER_BOARD = 5;
 
 // Leave home this many ms before (departure − drive time), as a safety margin.
@@ -55,6 +62,10 @@ const NEXT_MORNING_FROM = 20; // 8 PM
 // after midnight).
 const MORNING_START_MIN = 6 * 60 + 30; // 6:30 AM
 
+// The whole response must come back well inside the E-Ink device's 8 s fetch
+// timeout even when NJ Transit is hanging; past this we answer without live data.
+const LIVE_DEADLINE_MS = 3500;
+
 function nyHour(now: number): number {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
@@ -65,9 +76,11 @@ function nyHour(now: number): number {
   return h === 24 ? 0 : h;
 }
 
+type Mode = "morning" | "evening" | "next-morning";
+
 /** Pick which routes / direction / day to show based on the time of day. */
 function pickMode(now: number): {
-  mode: "morning" | "evening" | "next-morning";
+  mode: Mode;
   direction: "outbound" | "inbound";
   boards: BoardDef[];
   dayFilter: DayFilter;
@@ -107,10 +120,37 @@ function pickMode(now: number): {
   };
 }
 
+/** Resolve to `fallback` if `p` hasn't settled within `ms`. */
+function withDeadline<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), ms);
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(fallback);
+      }
+    );
+  });
+}
+
 export async function GET(req: Request) {
   // `?now=<epochMs>` overrides the clock for testing the time-of-day windows.
+  // An overridden clock never touches live data or live traffic (they describe
+  // the real present), and its response is never cached.
   const override = new URL(req.url).searchParams.get("now");
-  const now = override ? Number(override) : Date.now();
+  const overridden = override !== null;
+  const now = overridden ? Number(override) : Date.now();
+  if (!Number.isFinite(now) || now < 0 || now > 8.64e15) {
+    return NextResponse.json(
+      { error: "now must be epoch milliseconds" },
+      { status: 400, headers: { "Cache-Control": "no-store" } }
+    );
+  }
+
   const {
     mode,
     direction,
@@ -121,80 +161,171 @@ export async function GET(req: Request) {
     headline,
   } = pickMode(now);
 
-  // School drive (always shown) kicks off concurrently with station drives.
-  const commutePromise = driveSecondsToAddress("commute", commute.address, now);
+  // --- drive times -----------------------------------------------------------
+  // Live traffic only matters while someone is about to leave: today's outbound
+  // boards, inside the commute hours. Everything else uses the typical time.
+  const wantLiveTraffic =
+    !overridden && mode === "morning" && inLiveTrafficHours(now);
 
-  // Live DepartureVision status (delay / track / cancellations) only exists for
-  // near-term trains, so only fetch it for today's boards — the next-morning
-  // preview has no real-time data yet. Kicks off concurrently with the drives.
-  const liveBoardsPromise: Promise<Map<string, LiveTrain[]>> =
-    dayFilter === "today"
-      ? fetchLiveBoards(
-          [...new Set(boardDefs.map((b) => b.origin))],
-          now
-        )
-      : Promise.resolve(new Map<string, LiveTrain[]>());
+  const commutePromise = driveToAddress("commute", commute.address, wantLiveTraffic);
 
   // Drive-to-station / leave-by only applies to outbound (you drive from home
   // to the departure station). Compute once per unique origin station.
-  const driveByOrigin: Record<string, number | null> = {};
-  if (showLeave) {
-    const originIds = [...new Set(boardDefs.map((b) => b.origin))];
-    await Promise.all(
-      originIds.map(async (id) => {
-        driveByOrigin[id] = await driveSecondsTo(id, STATION_COORDS[id], now);
-      })
-    );
+  const originIds = [...new Set(boardDefs.map((b) => b.origin))];
+  const drivesPromise: Promise<[string, DriveEstimate | null][]> = showLeave
+    ? Promise.all(
+        originIds.map(
+          async (id) =>
+            [id, await driveTo(id, STATION_COORDS[id], wantLiveTraffic)] as [
+              string,
+              DriveEstimate | null,
+            ]
+        )
+      )
+    : Promise.resolve([]);
+
+  // --- live boards -----------------------------------------------------------
+  // Real-time data only exists for the near term, so only today's boards use
+  // it; the next-morning preview is timetable-only.
+  const wantLive = !overridden && dayFilter === "today";
+  const liveRequests: { code: string; variant: BoardVariant }[] = [];
+  if (wantLive && hasCredentials()) {
+    const seen = new Set<string>();
+    for (const b of boardDefs) {
+      for (const id of [b.origin, b.dest]) {
+        const code = NJT_STATION_2CHAR[id];
+        if (!code || seen.has(code)) continue;
+        // Home stations: the full board (with stop lists) — the schedule itself.
+        // City origins (evening): the light board, for track / boarding there.
+        if (HOME_STATIONS.has(id)) {
+          seen.add(code);
+          liveRequests.push({ code, variant: "full" });
+        } else if (id === b.origin) {
+          seen.add(code);
+          liveRequests.push({ code, variant: "light" });
+        }
+      }
+    }
   }
+  const livePromise = withDeadline(
+    fetchStationBoards(liveRequests),
+    LIVE_DEADLINE_MS,
+    new Map<string, LiveTrain[] | null>()
+  );
 
-  const commuteSec = await commutePromise;
-  const commute = {
-    name: commute.name,
-    driveMin: commuteSec != null ? Math.round(commuteSec / 60) : null,
-    etaEpochMs: commuteSec != null ? now + commuteSec * 1000 : null,
-    mapsUrl:
-      "https://www.google.com/maps/dir/?api=1" +
-      `&origin=${encodeURIComponent(HOME_ADDRESS)}` +
-      `&destination=${encodeURIComponent(commute.address)}` +
-      "&travelmode=driving",
-  };
+  const [commute, drives, liveBoards] = await Promise.all([
+    commutePromise,
+    drivesPromise,
+    livePromise,
+  ]);
+  const driveByOrigin = new Map(drives);
 
-  const liveBoards = await liveBoardsPromise;
+  // --- assemble ----------------------------------------------------------------
+  let liveUsed = false;
+  let liveMissing = false;
 
   const boards = boardDefs.map(({ origin, dest, short }) => {
-    const driveSec = showLeave ? driveByOrigin[origin] : null;
-    const liveTrains = liveBoards.get(origin);
-    const departures = nextDepartures(
+    const homeIsOrigin = HOME_STATIONS.has(origin);
+    const homeCode = NJT_STATION_2CHAR[homeIsOrigin ? origin : dest];
+    const homeBoard = liveBoards.get(homeCode) ?? null;
+    if (liveRequests.length > 0) {
+      if (homeBoard === null) liveMissing = true;
+    }
+
+    const built = buildBoard({
       origin,
       dest,
       now,
-      TRAINS_PER_BOARD,
+      limit: TRAINS_PER_BOARD,
       dayFilter,
-      minNyMinutes
-    ).map((d) => ({
-      ...d,
-      leaveByEpochMs:
-        driveSec != null ? d.depEpochMs - driveSec * 1000 - BUFFER_MS : null,
-      live: matchLiveStatus(liveTrains, d.depEpochMs, d.train),
-    }));
+      minNyMinutes,
+      homeIsOrigin,
+      homeBoard,
+      originBoard: homeIsOrigin ? null : liveBoards.get(NJT_STATION_2CHAR[origin]) ?? null,
+    });
+    if (built.source === "live") liveUsed = true;
+
+    const drive = showLeave ? driveByOrigin.get(origin) ?? null : null;
     return {
       origin: STATION_NAMES[origin],
       dest: STATION_NAMES[dest],
       destShort: short,
-      driveMin: driveSec != null ? Math.round(driveSec / 60) : null,
-      departures,
+      driveMin: drive ? Math.round(drive.sec / 60) : null,
+      driveSource: drive ? drive.source : null,
+      source: built.source,
+      departures: built.departures.map((d) => ({
+        depEpochMs: d.depEpochMs,
+        arrEpochMs: d.arrEpochMs,
+        depTime: d.depTime,
+        arrTime: d.arrTime,
+        routeName: d.routeName,
+        routeShort: d.routeShort,
+        color: d.color,
+        headsign: d.headsign,
+        durationMin: d.durationMin,
+        train: d.train,
+        source: d.source,
+        leaveByEpochMs: drive ? d.depEpochMs - drive.sec * 1000 - BUFFER_MS : null,
+        live: d.live,
+      })),
     };
   });
 
-  return NextResponse.json({
-    now,
-    generatedAt: SCHEDULE_GENERATED_AT,
-    bufferMin: BUFFER_MS / 60_000,
-    mode,
-    direction,
-    showLeave,
-    headline,
-    commute,
-    boards,
-  });
+  const commute = {
+    name: commute.name,
+    driveMin: commute ? Math.round(commute.sec / 60) : null,
+    driveSource: commute ? commute.source : null,
+    etaEpochMs: commute ? now + commute.sec * 1000 : null,
+    // No origin: Google Maps starts from wherever the phone is, and the home
+    // address never appears in this (public) response.
+    mapsUrl:
+      "https://www.google.com/maps/dir/?api=1" +
+      `&destination=${encodeURIComponent(commute.address)}` +
+      "&travelmode=driving",
+  };
+
+  // What each data source is doing, so screens can say what's wrong instead of
+  // showing a plausible-looking empty board.
+  const driveSources = [...driveByOrigin.values()].map((d) => d?.source ?? null);
+  const status = {
+    schedule: scheduleStatus(now),
+    // ok: live board in use · down: wanted but unavailable · off: not applicable
+    live: !wantLive || !hasCredentials()
+      ? ("off" as const)
+      : liveMissing || !liveUsed
+        ? ("down" as const)
+        : ("ok" as const),
+    drive: !showLeave
+      ? ("off" as const)
+      : driveSources.some((s) => s === "live")
+        ? ("live" as const)
+        : driveSources.some((s) => s === "typical")
+          ? ("typical" as const)
+          : ("none" as const),
+  };
+
+  return NextResponse.json(
+    {
+      now,
+      generatedAt: SCHEDULE_GENERATED_AT,
+      bufferMin: BUFFER_MS / 60_000,
+      mode,
+      direction,
+      showLeave,
+      headline,
+      status,
+      commute,
+      boards,
+    },
+    {
+      headers: {
+        // Let Vercel's edge answer bursts (several open tabs, the device) from
+        // one computation, and keep serving the last good answer for a moment
+        // if a recompute is slow. Short enough that countdowns stay honest.
+        "Cache-Control": overridden
+          ? "no-store"
+          : "public, max-age=0, s-maxage=15, stale-while-revalidate=30",
+      },
+    }
+  );
 }

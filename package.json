@@ -7,7 +7,10 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "build:schedule": "node scripts/build-schedule.mjs"
+    "build:schedule": "node scripts/build-schedule.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "check:schedule": "node scripts/build-schedule.mjs --check"
   },
   "dependencies": {
     "next": "15.5.19",
@@ -18,6 +21,7 @@
     "@types/node": "22.15.3",
     "@types/react": "19.1.8",
     "@types/react-dom": "19.1.6",
-    "typescript": "5.8.3"
+    "typescript": "5.8.3",
+    "vitest": "^3.2.7"
   }
 }

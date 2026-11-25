@@ -1,84 +1,109 @@
 # Family Dashboard — NJ Transit
 
-A simple wall/tablet dashboard showing the **next trains to New York and
-Hoboken from Morristown and Bernardsville**, built with Next.js.
+A wall/tablet dashboard — and an E-Ink sign (`firmware/`) — showing the **next
+trains between Morristown / Bernardsville and New York / Hoboken**, with a
+"leave the house by" time for each. Built with Next.js.
 
-It uses NJ Transit's **public GTFS static schedule feed** for the backbone
-schedule (no API key required), and — when RailData API credentials are
-configured — layers **real-time DepartureVision status** (delays, track
-assignments, "ALL ABOARD", cancellations) on top. See "Real-time status" below.
+Near-term trains come from **NJ Transit's live departure board**, so the list is
+what is actually running today (delays, tracks, cancellations, adjusted
+schedules). A bundled copy of the public timetable fills in beyond that and
+keeps the board working when the live feed isn't available.
 
 ## Quick start
 
 ```bash
 npm install
-npm run dev        # http://localhost:3000
+cp .env.example .env.local    # optional: see "Configuration"
+npm run dev                   # http://localhost:3000
+npm test                      # unit tests
 ```
 
-For an always-on display:
-
-```bash
-npm run build
-npm run start
-```
+With no configuration at all the board runs on the bundled timetable alone.
 
 ## How it works
 
-- **`scripts/build-schedule.mjs`** downloads NJ Transit's rail GTFS feed
-  (from the public Mobility Database mirror), keeps only the trips that run
-  between the four stations we care about, and writes a tiny
-  **`data/schedule.json`** (~20 KB).
-- **`lib/departures.ts`** computes the next departures from that file for the
-  current time, correctly handling the `America/New_York` timezone and
-  after-midnight (`24:xx`, `25:xx`) GTFS times.
-- **`app/api/departures/route.ts`** serves the four boards as JSON.
-- **`app/page.tsx`** renders the dashboard with a live clock, per-train
-  countdowns, and a refresh every 30 seconds.
+- **`app/api/departures/route.ts`** serves the boards as JSON. It picks the
+  view by New York time of day — morning (to the city), evening (heading home),
+  late evening (tomorrow morning) — and reports the health of each data source
+  in a `status` block so the screens can say what's wrong instead of showing a
+  plausible-looking empty board.
+- **`lib/board.ts`** builds each board "live first": for as far ahead as NJ
+  Transit's live board reaches (its next ~19 trains at the home station,
+  usually 4–8 hours) the trains listed are the ones NJ Transit says are running;
+  beyond that, and whenever live data is unavailable, the timetable fills in.
+- **`lib/njtransit.ts`** talks to NJ Transit's RailData API (the data behind
+  DepartureVision).
+- **`lib/departures.ts`** answers "what's next" from the bundled timetable,
+  handling `America/New_York`, daylight-saving days, and after-midnight
+  (`24:xx`) GTFS times.
+- **`lib/driving.ts`** supplies drive times for the "leave by" column.
+- **`app/page.tsx`** renders the dashboard, refreshing every 30 seconds.
 
-## Refreshing the schedule
+## Configuration
 
-NJ Transit updates the GTFS feed periodically. To pull the latest:
+Everything is optional and lives in environment variables — `.env.local`
+locally, the Vercel project settings in production. Nothing private belongs in
+the repo. See `.env.example`.
 
-```bash
-npm run build:schedule
-```
+| Variable | What it does |
+| --- | --- |
+| `DRIVE_TYPICAL_MIN` | Typical drive minutes per destination, e.g. `92=16,18=10,commute=15`. This is what "leave by" uses by default. |
+| `HOME_ADDRESS` | Where drives start. Only ever sent to Google for live traffic; never in the API response. |
+| `GOOGLE_MAPS_API_KEY` | Enables live traffic (Google Routes API). |
+| `DRIVE_LIVE_HOURS` | New York hours in which to ask for live traffic. Default `5-11`. |
+| `NJT_API_USERNAME` / `NJT_API_PASSWORD` | NJ Transit RailData credentials — enables the live board. |
 
-This rewrites `data/schedule.json`. Commit the result.
+### Drive times: typical first, live when it matters
+
+Each destination has a **typical** drive time you set once. That alone gives
+every train a "leave by", with nothing that can fail. **Live traffic** is an
+optional refinement: if a Google key is configured, the server asks Google at
+most once per destination per 10 minutes, and only during the morning hours
+when someone is about to leave — about 100 calls a day at most, however many
+screens are open. If Google is unconfigured, down, or the key stops working,
+the board uses the typical time and marks it with a `~` ("~16 min drive"). The
+reason for any Google failure is logged.
+
+### Live trains
+
+With RailData credentials set, each of today's boards is built from the live
+departure board of the home station (Morristown or Bernardsville). Every train
+there carries its full stop list, so one call gives departure and arrival times
+in both directions. In the evening the city station's board adds the track and
+"boarding" status at Penn / Hoboken.
+
+NJ Transit allows about five logins a day, so the login token is shared across
+server instances and replaced only when the API explicitly rejects it — a
+timeout is never treated as a bad token. Without credentials, or if the live
+feed is down, the board says so and shows the timetable.
+
+## The timetable
+
+`data/schedule.json` is a compact extract of NJ Transit's public rail GTFS feed,
+built by `scripts/build-schedule.mjs` (no API key needed). It only covers a few
+months of service dates, so it has to be refreshed:
+
+- **Automatically:** `.github/workflows/refresh-schedule.yml` runs daily. If the
+  trains changed it runs the tests and commits the new file to `main`. It fails
+  — and GitHub emails you — if it can't get a usable feed or the timetable has
+  under two weeks left.
+- **By hand:** `npm run build:schedule`, then commit `data/schedule.json`.
+  `npm run check:schedule` reports how many days are left.
+
+If the timetable ever does expire, the API says so (`status.schedule.expired`)
+and both screens show "timetable out of date" rather than "no trains".
 
 ## Changing stations
 
 Edit the `ORIGINS` / `DESTINATIONS` maps at the top of
-`scripts/build-schedule.mjs` (stop IDs come from the feed's `stops.txt`),
-then run `npm run build:schedule`. Update the `BOARDS` list in
-`app/api/departures/route.ts` to match.
+`scripts/build-schedule.mjs` (stop IDs come from the feed's `stops.txt`), run
+`npm run build:schedule`, then update the `OUTBOUND` / `INBOUND` board lists in
+`app/api/departures/route.ts` and the station codes in `lib/njtransit.ts`.
 
-## Real-time status
+## Checks
 
-The GTFS schedule is the backbone; **`lib/njtransit.ts`** layers live status on
-top from NJ Transit's [RailData API](https://developer.njtransit.com/) (the same
-data as DepartureVision). Each train on today's boards can show a live **delay**,
-**track**, **"ALL ABOARD"**, or **cancellation**.
-
-To enable it, set two environment variables (locally in `.env.local`, in
-production in the Vercel project settings) with your RailData API credentials:
-
-```bash
-NJT_API_USERNAME=your-username
-NJT_API_PASSWORD=your-password
-# optional: override the API base URL (defaults to the raildata.njtransit.com Train Data API)
-# NJT_API_BASE=https://raildata.njtransit.com/api/TrainData
-```
-
-Without them, the board runs on the GTFS schedule alone (every train's `live`
-field is simply `null`) — nothing breaks. The credentials are only ever read
-server-side in the API route; they never reach the browser or the E-Ink device.
-
-How it works: the client fetches a token (`getToken`), pulls each origin
-station's live board (`getTrainSchedule19Rec` — the light variant without
-per-train stop lists), and joins a live train to a scheduled departure by **train
-number** (the GTFS `block_id`, which equals the live `TRAIN_ID`), falling back to
-the scheduled minute. Matching by train number keeps it correct at busy stations
-like NY Penn and Hoboken where several lines depart the same minute. Token and
-per-station boards are cached to stay well under NJ Transit's daily request
-limits. Real-time data only exists for the near term, so the "next morning"
-preview stays schedule-only.
+`npm test` covers the timetable logic (including both daylight-saving days), the
+live-board merge against real captured NJ Transit data, the login budget, the
+drive-time fallbacks, and that the API never leaks the home address.
+`.github/workflows/ci.yml` runs them, the type check, the production build, a
+firmware compile, and renders every E-Ink screen state on each push.

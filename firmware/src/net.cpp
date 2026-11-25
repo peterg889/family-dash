@@ -1,6 +1,7 @@
 // firmware/src/net.cpp — WiFi association + auto-reconnect.
-// Adapted (simplified) from the Clawdmeter net module: no server-URL
-// resolution, since the schedule is baked in and WiFi only feeds NTP.
+// Adapted (simplified) from the Clawdmeter net module. The board itself is
+// fetched over this connection (see board_api.cpp), so net_state() also drives
+// what the screen says when there is nothing to show.
 #include "net.h"
 #include "wifi_config.h"
 
@@ -67,3 +68,4 @@ void net_tick(void) {
 net_state_t net_state(void) { return s_state; }
 const char* net_ssid(void) { return WIFI_SSID; }
 const char* net_ip(void) { return s_ip_buf; }
+int net_rssi(void) { return s_state == NET_CONNECTED ? (int)WiFi.RSSI() : 0; }

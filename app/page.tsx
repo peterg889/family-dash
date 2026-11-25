@@ -24,19 +24,35 @@ type Departure = {
   live?: LiveStatus | null;
 };
 
+type DriveSource = "live" | "typical" | null;
+
 type Board = {
   origin: string;
   dest: string;
   destShort?: string;
   driveMin: number | null;
+  driveSource?: DriveSource;
   departures: Departure[];
 };
 
 type Commute = {
   name: string;
   driveMin: number | null;
+  driveSource?: DriveSource;
   etaEpochMs: number | null;
   mapsUrl: string;
+};
+
+// What each data source is doing — so the page can say what's wrong instead of
+// showing a plausible-looking empty board.
+type Status = {
+  schedule: {
+    validThrough: string | null;
+    daysLeft: number;
+    expired: boolean;
+  };
+  live: "ok" | "down" | "off";
+  drive: "live" | "typical" | "none" | "off";
 };
 
 type ApiResponse = {
@@ -44,9 +60,34 @@ type ApiResponse = {
   generatedAt: string;
   headline?: string;
   showLeave?: boolean;
+  status?: Status;
   commute?: Commute;
   boards: Board[];
 };
+
+/** "16" for live traffic, "~16" for a typical (not live) drive time. */
+function driveLabel(min: number, source?: DriveSource): string {
+  return source === "typical" ? `~${min}` : `${min}`;
+}
+
+/** One-line notices about degraded data, most serious first. */
+function notices(data: ApiResponse, stale: boolean, error: boolean): string[] {
+  const out: string[] = [];
+  const st = data.status;
+  if (st?.schedule.expired) {
+    out.push(
+      "Timetable out of date — the schedule on the server has expired, so trains can’t be shown."
+    );
+  } else if (st && st.schedule.daysLeft <= 7) {
+    out.push(
+      `Timetable runs out in ${Math.max(0, st.schedule.daysLeft)} day${st.schedule.daysLeft === 1 ? "" : "s"} — it needs refreshing.`
+    );
+  }
+  if (error || stale) out.push("Can’t reach the server — showing the last board received.");
+  if (st?.live === "down") out.push("NJ Transit live status unavailable — showing the timetable only.");
+  if (st?.drive === "none") out.push("No drive times configured — showing train times only.");
+  return out;
+}
 
 const REFRESH_MS = 30_000;
 
@@ -152,7 +193,12 @@ function BoardGroup({
           <span className="arr-i">→</span>
           <span className="to">{board.destShort ?? board.dest}</span>
           {board.driveMin != null && (
-            <span className="drive">{board.driveMin} min drive</span>
+            <span
+              className="drive"
+              title={board.driveSource === "typical" ? "typical drive time (not live traffic)" : "live traffic"}
+            >
+              {driveLabel(board.driveMin, board.driveSource)} min drive
+            </span>
           )}
         </td>
       </tr>
@@ -252,6 +298,13 @@ export default function Page() {
           <span className="clock">{clockTime}</span>
         </div>
 
+        {data &&
+          notices(data, stale, error).map((n) => (
+            <div className="notice" key={n}>
+              {n}
+            </div>
+          ))}
+
         {data ? (
           <table className="board-table">
             <thead>
@@ -291,7 +344,7 @@ export default function Page() {
           </span>
           <span className="cm-right">
             <span className="cm-time">
-              {data.commute.driveMin}
+              {driveLabel(data.commute.driveMin, data.commute.driveSource)}
               <span className="cm-unit">min</span>
             </span>
             {data.commute.etaEpochMs != null && (

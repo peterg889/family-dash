@@ -2,7 +2,7 @@ import scheduleData from "@/data/schedule.json";
 
 const TZ = "America/New_York";
 
-type Trip = {
+export type Trip = {
   route: string;
   service: string;
   origin: string;
@@ -11,12 +11,14 @@ type Trip = {
   arr: string;
   headsign: string;
   train?: string; // train number (GTFS block_id), for live-status matching
+  ends?: boolean; // the trip's final stop is `dest` (it terminates there)
 };
 
 type StationCoord = { name: string; lat: number; lon: number };
 
-type Schedule = {
+export type Schedule = {
   generatedAt: string;
+  source?: string;
   origins: Record<string, string>;
   destinations: Record<string, string>;
   coords: Record<string, StationCoord>;
@@ -25,7 +27,7 @@ type Schedule = {
   calendar: Record<string, string[]>;
 };
 
-const schedule = scheduleData as Schedule;
+const bundled = scheduleData as Schedule;
 
 export type Departure = {
   depEpochMs: number;
@@ -38,6 +40,7 @@ export type Departure = {
   headsign: string;
   durationMin: number;
   train: string; // train number, for joining live DepartureVision status
+  endsAtDest: boolean; // terminates at the destination (see lib/board.ts)
 };
 
 // --- timezone helpers --------------------------------------------------------
@@ -68,16 +71,32 @@ function tzOffsetMs(date: Date): number {
   return asUTC - date.getTime();
 }
 
-/** Epoch ms for midnight (00:00:00) of the given NY calendar date. */
-function nyMidnightEpoch(y: number, mo: number, d: number): number {
-  const naive = Date.UTC(y, mo - 1, d, 0, 0, 0);
-  // Two passes converge even across DST boundaries.
+/** Epoch ms for a New York wall-clock time (two passes converge across DST). */
+export function nyWallToEpoch(
+  y: number,
+  mo: number, // 1-12; day/hour overflow is normalized (d + 1 past month end is fine)
+  d: number,
+  h = 0,
+  mi = 0,
+  s = 0
+): number {
+  const naive = Date.UTC(y, mo - 1, d, h, mi, s);
   let guess = naive - tzOffsetMs(new Date(naive));
   guess = naive - tzOffsetMs(new Date(guess));
   return guess;
 }
 
-function nyDateParts(epoch: number): { y: number; mo: number; d: number } {
+/**
+ * The instant GTFS times are measured from on a service day: "noon minus 12h".
+ * That is local midnight on ordinary days, but on the two daylight-saving
+ * changeover days it is an hour off local midnight — and using local midnight
+ * there shifts every train that day by an hour.
+ */
+export function serviceDayAnchor(y: number, mo: number, d: number): number {
+  return nyWallToEpoch(y, mo, d, 12) - 12 * 3600_000;
+}
+
+export function nyDateParts(epoch: number): { y: number; mo: number; d: number } {
   const dtf = new Intl.DateTimeFormat("en-CA", {
     timeZone: TZ,
     year: "numeric",
@@ -93,13 +112,19 @@ function dateKey(y: number, mo: number, d: number): string {
   return `${y}${String(mo).padStart(2, "0")}${String(d).padStart(2, "0")}`;
 }
 
+/** YYYYMMDD of an instant's New York calendar date. */
+export function nyDateKey(epoch: number): string {
+  const { y, mo, d } = nyDateParts(epoch);
+  return dateKey(y, mo, d);
+}
+
 function gtfsSeconds(t: string): number {
   const [h, m, s] = t.split(":").map(Number);
   return h * 3600 + m * 60 + s;
 }
 
 /** Minutes after midnight (0–1439) of an instant in New York. */
-function nyMinutesOf(epoch: number): number {
+export function nyMinutesOf(epoch: number): number {
   const p: Record<string, string> = {};
   for (const part of new Intl.DateTimeFormat("en-US", {
     timeZone: TZ,
@@ -113,7 +138,7 @@ function nyMinutesOf(epoch: number): number {
   return h * 60 + Number(p.minute);
 }
 
-function fmtTime(epoch: number): string {
+export function fmtTime(epoch: number): string {
   return new Intl.DateTimeFormat("en-US", {
     timeZone: TZ,
     hour: "numeric",
@@ -127,6 +152,25 @@ export type BoardKey = { origin: string; dest: string };
 
 export type DayFilter = "any" | "today" | "tomorrow";
 
+/** True when `depEpochMs` passes the day / earliest-minute filters for `now`. */
+export function passesDayFilter(
+  depEpochMs: number,
+  now: number,
+  dayFilter: DayFilter,
+  minNyMinutes?: number
+): boolean {
+  if (dayFilter !== "any") {
+    const { y, mo, d } = nyDateParts(now);
+    const wantKey =
+      dayFilter === "today"
+        ? dateKey(y, mo, d)
+        : nyDateKey(nyWallToEpoch(y, mo, d + 1, 12));
+    if (nyDateKey(depEpochMs) !== wantKey) return false;
+  }
+  if (minNyMinutes != null && nyMinutesOf(depEpochMs) < minNyMinutes) return false;
+  return true;
+}
+
 /**
  * Next upcoming departures from `origin` to `dest`, computed against `now`
  * (epoch ms). Looks across yesterday/today/tomorrow service dates so that
@@ -139,6 +183,8 @@ export type DayFilter = "any" | "today" | "tomorrow";
  *
  * `minNyMinutes`, when set, drops departures before that many minutes after
  * New York midnight (e.g. 390 = 6:30 AM) when previewing the next morning.
+ *
+ * `sched` defaults to the bundled data/schedule.json; tests pass a fixture.
  */
 export function nextDepartures(
   origin: string,
@@ -146,42 +192,31 @@ export function nextDepartures(
   now: number = Date.now(),
   limit = 4,
   dayFilter: DayFilter = "any",
-  minNyMinutes?: number
+  minNyMinutes?: number,
+  sched: Schedule = bundled
 ): Departure[] {
-  const trips = schedule.trips.filter(
+  const trips = sched.trips.filter(
     (t) => t.origin === origin && t.dest === dest
   );
 
   const { y, mo, d } = nyDateParts(now);
-  const todayKey = dateKey(y, mo, d);
-  const tomParts = nyDateParts(nyMidnightEpoch(y, mo, d + 1) + 12 * 3600_000);
-  const tomorrowKey = dateKey(tomParts.y, tomParts.mo, tomParts.d);
 
   const candidates: Departure[] = [];
   for (const offset of [-1, 0, 1]) {
-    const dayMidnight = nyMidnightEpoch(y, mo, d + offset);
-    const parts = nyDateParts(dayMidnight + 12 * 3600_000); // noon, DST-safe
-    const key = dateKey(parts.y, parts.mo, parts.d);
+    const noon = nyWallToEpoch(y, mo, d + offset, 12);
+    const anchor = noon - 12 * 3600_000; // GTFS service-day origin (DST-safe)
+    const key = nyDateKey(noon);
 
     for (const trip of trips) {
-      const dates = schedule.calendar[trip.service];
+      const dates = sched.calendar[trip.service];
       if (!dates || !dates.includes(key)) continue;
 
-      const depEpochMs = dayMidnight + gtfsSeconds(trip.dep) * 1000;
+      const depEpochMs = anchor + gtfsSeconds(trip.dep) * 1000;
       if (depEpochMs < now) continue;
+      if (!passesDayFilter(depEpochMs, now, dayFilter, minNyMinutes)) continue;
 
-      if (dayFilter !== "any") {
-        const dp = nyDateParts(depEpochMs);
-        const depKey = dateKey(dp.y, dp.mo, dp.d);
-        const wantKey = dayFilter === "today" ? todayKey : tomorrowKey;
-        if (depKey !== wantKey) continue;
-      }
-
-      if (minNyMinutes != null && nyMinutesOf(depEpochMs) < minNyMinutes)
-        continue;
-
-      const arrEpochMs = dayMidnight + gtfsSeconds(trip.arr) * 1000;
-      const route = schedule.routes[trip.route];
+      const arrEpochMs = anchor + gtfsSeconds(trip.arr) * 1000;
+      const route = sched.routes[trip.route];
       candidates.push({
         depEpochMs,
         arrEpochMs,
@@ -193,24 +228,86 @@ export function nextDepartures(
         headsign: trip.headsign,
         durationMin: Math.max(0, Math.round((arrEpochMs - depEpochMs) / 60000)),
         train: trip.train ?? "",
+        endsAtDest: trip.ends === true,
       });
     }
   }
 
   // Dedup (a trip can match in two day windows) and sort by time.
-  const seen = new Set<number>();
+  const seen = new Set<string>();
   return candidates
-    .filter((c) => (seen.has(c.depEpochMs) ? false : seen.add(c.depEpochMs)))
+    .filter((c) => {
+      const k = `${c.depEpochMs}|${c.train}`;
+      return seen.has(k) ? false : (seen.add(k), true);
+    })
     .sort((a, b) => a.depEpochMs - b.depEpochMs)
     .slice(0, limit);
 }
 
+// --- schedule validity -------------------------------------------------------
+
+export type ScheduleStatus = {
+  generatedAt: string;
+  validFrom: string | null; // YYYY-MM-DD, first service date in the timetable
+  validThrough: string | null; // YYYY-MM-DD, last service date in the timetable
+  daysLeft: number; // whole days of timetable left after today (negative = expired)
+  expired: boolean; // today is outside the timetable — no trains can be shown
+};
+
+function isoDate(key: string): string {
+  return `${key.slice(0, 4)}-${key.slice(4, 6)}-${key.slice(6, 8)}`;
+}
+
+/**
+ * How much timetable is left. The bundled schedule only lists service dates
+ * for a few months; once today falls outside that range every board comes back
+ * empty, which looks exactly like "no trains today" unless we say otherwise.
+ */
+export function scheduleStatus(
+  now: number = Date.now(),
+  sched: Schedule = bundled
+): ScheduleStatus {
+  let min: string | null = null;
+  let max: string | null = null;
+  for (const dates of Object.values(sched.calendar)) {
+    for (const d of dates) {
+      if (min === null || d < min) min = d;
+      if (max === null || d > max) max = d;
+    }
+  }
+  if (min === null || max === null) {
+    return {
+      generatedAt: sched.generatedAt,
+      validFrom: null,
+      validThrough: null,
+      daysLeft: -1,
+      expired: true,
+    };
+  }
+  const today = nyDateKey(now);
+  const toUtc = (k: string) =>
+    Date.UTC(Number(k.slice(0, 4)), Number(k.slice(4, 6)) - 1, Number(k.slice(6, 8)));
+  const daysLeft = Math.round((toUtc(max) - toUtc(today)) / 86_400_000);
+  return {
+    generatedAt: sched.generatedAt,
+    validFrom: isoDate(min),
+    validThrough: isoDate(max),
+    daysLeft,
+    expired: today > max || today < min,
+  };
+}
+
 export const STATION_NAMES = {
-  ...schedule.origins,
-  ...schedule.destinations,
+  ...bundled.origins,
+  ...bundled.destinations,
 } as Record<string, string>;
 
 /** Lat/lon per stop_id, for computing drive time to the departure station. */
-export const STATION_COORDS = schedule.coords as Record<string, StationCoord>;
+export const STATION_COORDS = bundled.coords as Record<string, StationCoord>;
 
-export const SCHEDULE_GENERATED_AT = schedule.generatedAt;
+export const SCHEDULE_GENERATED_AT = bundled.generatedAt;
+
+/** Route display info (name / short / color) for a GTFS route id. */
+export function routeInfo(routeId: string, sched: Schedule = bundled) {
+  return sched.routes[routeId];
+}
