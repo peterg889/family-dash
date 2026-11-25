@@ -152,14 +152,15 @@ See `firmware/README.md` for the full board spec, pinout, and gotchas. Key facts
   countdown ("LEAVE IN 11 min") plus "by 7:16a" for the next catchable train;
   beyond 90 minutes, on a later day, and all night it shows the clock time
   instead ("TOMORROW • LEAVE AT 6:08 am"). Below it, four roomy one-line rows:
-  leave-by, station, train → destination (no arrival time — the owner found
-  five rows with arrival times cluttered). No track numbers; delay pills only
-  from 3 minutes; a cancelled train is struck through and never the hero. Up/down
+  leave-by, station, train → arrival (four, not five: the owner found five
+  cluttered, but wants the arrival time kept on every row). No track numbers;
+  delay pills only from 3 minutes; a cancelled train is struck through and never the hero. Up/down
   pages through later trains and returns by itself after 60 s. It never shows
   trains home, transfers, or a pickup view (owner's decisions).
 - **Bottom band**, by priority: OFFLINE banner (>30 min) · "updated N min ago"
   (>6 min) · NJ Transit alert, one line, only if the server marks it `urgent`
-  (it says trains are affected; general notices stay on the web page) · "schedule only
+  (it says trains are affected — the owner doesn't want bus or general notices,
+  on the sign or the web page) · "schedule only
   - no live status" · "timetable out of date". WiFi down, server unreachable,
   expired timetable and "setting the clock" each have their own full screen —
   it never says "no trains" for a different problem.
