@@ -1,27 +1,28 @@
 #!/bin/bash
-# Render the E-Ink UI natively (no device) to a PNG for fast design iteration.
-# Usage: tools/preview/render.sh [unix-epoch] [out.png] [scale] [net] [valid]
+# Render one E-Ink screen natively (no device) to a PNG for fast design iteration.
+# Usage: tools/preview/render.sh [unix-epoch|0] [out.png] [scale] [screen] [scenario]
+#   epoch     0 = the scenario's own time of day
+#   screen    0 = Morristown, 1 = Bernardsville
+#   scenario  morning (default), evening, next-morning, cancelled-first,
+#             offline-banner, schedule-expired, ... — `render.sh --list` for all
 set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$DIR/../.."
-SRC="$ROOT/firmware/src"
-LIB="$ROOT/firmware/.pio/libdeps/crowpanel_epaper42/Adafruit GFX Library"
-SHIM="$DIR/shim"
+source "$DIR/_build.sh"
 TMP="$(mktemp -d)"
 trap "rm -rf '$TMP'" EXIT
 
-EPOCH="${1:-$(date +%s)}"
+build_preview "$TMP/preview"
+if [ "$1" = "--list" ]; then
+    "$TMP/preview" --list
+    exit 0
+fi
+
+EPOCH="${1:-0}"
 OUT="${2:-$DIR/preview.png}"
 SCALE="${3:-2}"
-SCREEN="${4:-0}"  # 0 = leave, 1 = board
+SCREEN="${4:-0}"
+SCENARIO="${5:-}"
 
-c++ -std=c++17 -O1 -w -DARDUINO=10819 \
-    -I "$SHIM" -I "$LIB" -I "$SRC" \
-    "$DIR/preview_main.cpp" "$SRC/ui.cpp" \
-    "$LIB/Adafruit_GFX.cpp" \
-    -o "$TMP/preview"
-
-"$TMP/preview" "$EPOCH" "$TMP/preview.raw" "$SCREEN"
-
+"$TMP/preview" "$EPOCH" "$TMP/preview.raw" "$SCREEN" "$SCENARIO"
 python3 "$DIR/raw2png.py" "$TMP/preview.raw" "$OUT" "$SCALE"
 echo "-> $OUT"
