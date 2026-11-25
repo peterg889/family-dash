@@ -10,6 +10,7 @@ import { _resetForTests as resetNjt } from "@/lib/njtransit";
 import { _resetForTests as resetDrive } from "@/lib/driving";
 
 const HOME = "1 Test Lane, Testville, NJ 00000";
+const SCHOOL = "9 Example School Rd, Testville, NJ 00000";
 
 // A day safely inside whatever timetable is bundled right now: three days after
 // it was generated. `at(h)` is that day at hour h, New York time.
@@ -35,6 +36,8 @@ beforeEach(() => {
   process.env.HOME_ADDRESS = HOME;
   delete process.env.GOOGLE_MAPS_API_KEY;
   runtimeCache.clear();
+  process.env.COMMUTE_NAME = "School";
+  process.env.COMMUTE_ADDRESS = SCHOOL;
   seedDriveTimes({ "92": 16, "18": 10, commute: 15 });
   delete process.env.NJT_API_USERNAME;
   delete process.env.NJT_API_PASSWORD;
@@ -53,7 +56,20 @@ describe("GET /api/departures", () => {
     const text = await res.text();
     expect(text).not.toContain("Test Lane");
     expect(text).not.toContain(encodeURIComponent("Test Lane"));
-    expect(JSON.parse(text).commute.mapsUrl).not.toContain("origin=");
+  });
+
+  it("shows the second drive-time tile by name only — never its address", async () => {
+    const res = await GET(new Request(`https://example.test/api/departures?now=${at(7)}`));
+    const text = await res.text();
+    expect(JSON.parse(text).commute).toMatchObject({ name: "School", driveMin: 15, driveSource: "earlier" });
+    expect(text).not.toContain("Example School Rd");
+    expect(text).not.toContain(encodeURIComponent("Example School Rd"));
+    expect(text).not.toContain("maps");
+  });
+
+  it("has no second tile unless one is configured", async () => {
+    delete process.env.COMMUTE_ADDRESS;
+    expect((await call(`?now=${at(7)}`)).body.commute).toBeNull();
   });
 
   it("morning: outbound boards with a leave-by from Google's last measurement", async () => {

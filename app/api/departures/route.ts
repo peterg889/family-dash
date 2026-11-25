@@ -20,11 +20,16 @@ import { deviceId, lastSeen, recordHeartbeat } from "@/lib/heartbeat";
 
 export const dynamic = "force-dynamic";
 
-// Daily school run — drive time + ETA from home, with a Maps directions link.
-const commute = {
-  name: "School",
-  address: "9 Example School Rd, Exampleville, NJ 00000",
-};
+/**
+ * An optional second drive-time tile (e.g. the school run). Its name and
+ * address are settings (COMMUTE_NAME / COMMUTE_ADDRESS), never in the repo —
+ * and the address is only ever sent to Google, never returned by this API.
+ */
+function commuteDestination(): { name: string; address: string } | null {
+  const name = process.env.COMMUTE_NAME?.trim();
+  const address = process.env.COMMUTE_ADDRESS?.trim();
+  return name && address ? { name, address } : null;
+}
 
 type BoardDef = { origin: string; dest: string; short: string };
 
@@ -206,7 +211,10 @@ export async function GET(req: Request) {
   // test clock never calls Google.
   const allowGoogle = !overridden;
 
-  const commutePromise = driveToAddress("commute", commute.address, allowGoogle);
+  const commuteDest = commuteDestination();
+  const commutePromise: Promise<DriveEstimate | null> = commuteDest
+    ? driveToAddress("commute", commuteDest.address, allowGoogle)
+    : Promise.resolve(null);
 
   // Drive-to-station / leave-by only applies to outbound (you drive from home
   // to the departure station). Compute once per unique origin station.
@@ -252,7 +260,7 @@ export async function GET(req: Request) {
     new Map<string, LiveTrain[] | null>()
   );
 
-  const [commute, drives, liveBoards, signSeenMs] = await Promise.all([
+  const [commuteDrive, drives, liveBoards, signSeenMs] = await Promise.all([
     commutePromise,
     drivesPromise,
     livePromise,
@@ -312,19 +320,17 @@ export async function GET(req: Request) {
     };
   });
 
-  const commute = {
-    name: commute.name,
-    driveMin: commute ? Math.round(commute.sec / 60) : null,
-    driveSource: commute ? commute.source : null,
-    driveMeasuredAtMs: commute ? commute.measuredAt : null,
-    etaEpochMs: commute ? now + commute.sec * 1000 : null,
-    // No origin: Google Maps starts from wherever the phone is, and the home
-    // address never appears in this (public) response.
-    mapsUrl:
-      "https://www.google.com/maps/dir/?api=1" +
-      `&destination=${encodeURIComponent(commute.address)}` +
-      "&travelmode=driving",
-  };
+  // Name and drive time only: neither the home address nor the destination's
+  // address ever appears in this (public) response.
+  const commute = commuteDest
+    ? {
+        name: commuteDest.name,
+        driveMin: commuteDrive ? Math.round(commuteDrive.sec / 60) : null,
+        driveSource: commuteDrive ? commuteDrive.source : null,
+        driveMeasuredAtMs: commuteDrive ? commuteDrive.measuredAt : null,
+        etaEpochMs: commuteDrive ? now + commuteDrive.sec * 1000 : null,
+      }
+    : null;
 
   // NJ Transit's own service alerts for these stations — they arrive with the
   // boards we already fetched.

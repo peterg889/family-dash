@@ -44,7 +44,6 @@ type Commute = {
   driveSource?: DriveSource;
   driveMeasuredAtMs?: number | null;
   etaEpochMs: number | null;
-  mapsUrl: string;
 };
 
 // What each data source is doing — so the page can say what's wrong instead of
@@ -69,7 +68,7 @@ type ApiResponse = {
   showLeave?: boolean;
   status?: Status;
   alerts?: { text: string }[];
-  commute?: Commute;
+  commute?: Commute | null;
   boards: Board[];
 };
 
@@ -387,14 +386,9 @@ export default function Page() {
       </section>
 
       {data?.commute?.driveMin != null && (
-        <a
-          className="panel commute"
-          href={data.commute.mapsUrl}
-          target="_blank"
-          rel="noreferrer"
-        >
+        <div className="panel commute">
           <span className="cm-left">
-            <span className="cm-kicker">school run · drive</span>
+            <span className="cm-kicker">drive time</span>
             <span className="cm-name">{data.commute.name}</span>
           </span>
           <span className="cm-right">
@@ -408,7 +402,7 @@ export default function Page() {
               </span>
             )}
           </span>
-        </a>
+        </div>
       )}
     </main>
   );

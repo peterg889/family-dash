@@ -58,6 +58,8 @@ beforeAll(async () => {
   resetNjt();
   resetDrive();
   // Google measured these two hours ago (shown as "earlier").
+  process.env.COMMUTE_NAME = "School";
+  process.env.COMMUTE_ADDRESS = "9 Example School Rd, Testville, NJ";
   for (const [key, min] of Object.entries({ "92": 19, "18": 10, commute: 17 })) {
     runtimeCache.set(`drive$last:${key}`, { value: { sec: min * 60, at: NOW - 2 * 3600_000 }, expires: Infinity });
   }

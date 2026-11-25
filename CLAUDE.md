@@ -4,7 +4,8 @@ Family Dashboard — an NJ Transit "next trains" board with two front-ends:
 
 1. **Web app** (Next.js, `app/` `lib/` `scripts/`) — the deployed dashboard at
    `family-dash-beta.vercel.app`. Dark board with LEAVE / catch / arrive per
-   train, a "leave by" column, and a School commute tile. Time-of-day
+   train, a "leave by" column, and an optional second drive-time tile (the
+   school run; `COMMUTE_NAME` / `COMMUTE_ADDRESS`). Time-of-day
    modes: morning (to NYC), evening (heading home), and next-morning.
 2. **E-Ink device** (`firmware/`) — an Elecrow CrowPanel ESP32 E-Paper 4.2"
    (400×300 B/W) that **fetches the web app's `/api/departures`** and renders
@@ -13,12 +14,14 @@ Family Dashboard — an NJ Transit "next trains" board with two front-ends:
 
 Deploy: `main` is the production branch (Vercel git integration). Push to `main`
 → auto-deploys → `family-dash-beta`. Secrets and anything private live in Vercel
-env, never in the repo or on the device: `HOME_ADDRESS`,
-`GOOGLE_MAPS_API_KEY`, `NJT_API_USERNAME` / `NJT_API_PASSWORD` (see
+env, never in the repo or on the device: `HOME_ADDRESS`, `COMMUTE_NAME` /
+`COMMUTE_ADDRESS`, `GOOGLE_MAPS_API_KEY`, `NJT_API_USERNAME` / `NJT_API_PASSWORD` (see
 `.env.example`). Production values are "sensitive" (unreadable); the
 *development* environment has readable copies — `vercel env pull .env.local`
 gets working NJT credentials for local testing. **The repo is public: never
-commit an address, key, or credential.**
+commit an address, a place name that locates the family (home, school), a key,
+or a credential — and never return one from the API.** The history was rewritten
+on 2026-11-25 to remove the home address and the school.
 
 Checks: `npm test` (vitest), `npm run typecheck`, `npm run build`.
 `.github/workflows/ci.yml` runs those plus a firmware compile and a render of

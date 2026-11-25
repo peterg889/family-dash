@@ -51,6 +51,7 @@ the repo. See `.env.example`.
 | Variable | What it does |
 | --- | --- |
 | `HOME_ADDRESS` | Where drives start. Only ever sent to Google to measure drive times; never in the API response. |
+| `COMMUTE_NAME` / `COMMUTE_ADDRESS` | Optional second drive-time tile (for example the school run). The name is shown; the address is only ever sent to Google. |
 | `GOOGLE_MAPS_API_KEY` | A Google Cloud API key with the **Routes API** enabled (billing on). Needed for drive times and "leave by". |
 | `DRIVE_LIVE_HOURS` | New York hours in which drive times are re-measured. Default `6-8`. |
 | `NJT_API_USERNAME` / `NJT_API_PASSWORD` | NJ Transit RailData credentials — enables the live board. |

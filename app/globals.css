@@ -316,20 +316,14 @@ body::before {
   font-style: italic;
 }
 
-/* ---- school-run commute: its own card, taps through to Maps directions ---- */
+/* ---- second drive-time tile (e.g. the school run): its own card ---- */
 .commute {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   padding: clamp(11px, 1.7vw, 15px) clamp(13px, 2vw, 16px);
-  text-decoration: none;
-  color: inherit;
   animation-delay: 0.09s;
-  transition: border-color 0.2s ease;
-}
-.commute:hover {
-  border-color: var(--amber-soft);
 }
 .cm-left {
   display: flex;

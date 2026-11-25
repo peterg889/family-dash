@@ -31,8 +31,7 @@
   "driveMin": 17,
   "driveSource": "earlier",
   "driveMeasuredAtMs": 1795613040000,
-  "etaEpochMs": 1795621260000,
-  "mapsUrl": "https://www.google.com/maps/dir/?api=1&destination=9%20Example%20School%20Rd&travelmode=driving"
+  "etaEpochMs": 1795621260000
  },
  "boards": [
   {
