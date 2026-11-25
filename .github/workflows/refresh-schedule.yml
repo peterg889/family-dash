@@ -1,0 +1,60 @@
+# Keeps data/schedule.json current. Every morning it downloads NJ Transit's rail
+# timetable; if the trains changed it runs the tests and commits the new file to
+# main (which deploys). It FAILS — and GitHub emails the repo owner — when it
+# can't get a usable feed or the bundled timetable has under two weeks left, so
+# an expiring timetable is a red X weeks ahead instead of a silently empty board.
+name: Refresh timetable
+
+on:
+  schedule:
+    - cron: "23 9 * * *" # daily, about 4:23–5:23 AM New York
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-schedule
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Rebuild data/schedule.json from NJ Transit's feed
+        id: build
+        continue-on-error: true
+        run: node scripts/build-schedule.mjs
+
+      - name: Test and commit the new timetable
+        if: steps.build.outcome == 'success'
+        run: |
+          if git diff --quiet -- data/schedule.json; then
+            echo "Timetable unchanged."
+            exit 0
+          fi
+          npm install --no-audit --no-fund
+          npm test
+          # Author the commit as the repo owner (Vercel's Hobby plan only deploys
+          # commits by the account owner on private repos); the committer stays
+          # the Actions bot, so it is still plainly an automated commit.
+          AUTHOR="${{ github.repository_owner }} <${{ github.repository_owner_id }}+${{ github.repository_owner }}@users.noreply.github.com>"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --author="$AUTHOR" -m "Refresh NJ Transit timetable (automated)" -- data/schedule.json
+          git push
+
+      - name: Fail if the timetable is running out
+        run: node scripts/build-schedule.mjs --check
+
+      - name: Fail if no usable feed could be downloaded
+        if: steps.build.outcome != 'success'
+        run: |
+          echo "::error::Could not build a timetable from any feed — see the 'Rebuild' step."
+          exit 1
