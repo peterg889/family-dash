@@ -154,8 +154,10 @@ See `firmware/README.md` for the full board spec, pinout, and gotchas. Key facts
   countdown ("LEAVE IN 11 min") plus "by 7:16a" for the next catchable train;
   beyond 90 minutes, on a later day, and all night it shows the clock time
   instead ("TOMORROW • LEAVE AT 6:08 am"). Below it, four roomy one-line rows:
-  leave-by, station, train → arrival (four, not five: the owner found five
-  cluttered, but wants the arrival time kept on every row). No track numbers;
+  leave-by, station, train → destination … arrival (four, not five: the owner
+  found five cluttered, but wants the arrival time kept on every row). The
+  destination starts right after the arrow and the arrival time is
+  right-aligned, so neither shifts with the other's width (owner's request). No track numbers;
   delay pills only from 3 minutes; a cancelled train is struck through and never the hero. Up/down
   pages through later trains and returns by itself after 60 s. It never shows
   trains home, transfers, or a pickup view (owner's decisions).
