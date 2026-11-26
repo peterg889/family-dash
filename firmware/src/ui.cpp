@@ -54,6 +54,7 @@ static const int FOOTER_BASE = 294;
 static const int X_STATION = 75;  // after "12:57p" in bold
 static const int X_TRAIN = 184;   // after "Bernardsville"
 static const int X_ARROW = 233;   // after "12:12"; the same on every row
+static const int X_DEST = X_ARROW + 12 + 6;  // destination, just after the arrow
 
 // A countdown is only shown this close to leaving; further out (and for any
 // later day, and all night) the screen gives the clock time instead.
@@ -581,24 +582,17 @@ static void draw_row(GFXcanvas1& c, const BoardData& data, const DepRef& r,
   // without one the first column already is the train's time.
   if (leave) draw_left(c, f, X_TRAIN, y, INK, dp);
 
-  // Right-hand end: "Hoboken 8:28a" — the owner wants the arrival time on
-  // every row — or, when there is something to flag, the destination and a pill.
-  char tail[32];
-  int tailRight = RIGHT;
-  if (badge[0]) {
+  // Then "-> Penn ......... 9:24a": the destination starts right after the
+  // arrow and the arrival time sits against the right edge, so both form
+  // straight columns whatever the width of the time (the owner didn't like the
+  // destination shifting with it). The arrival time is on every row; when there
+  // is something to flag, a pill takes its place.
+  draw_arrow(c, X_ARROW, y, INK);
+  draw_left(c, f, X_DEST, y, INK, r.b->destShort);
+  if (badge[0])
     draw_pill(c, RIGHT, y, badge);
-    tailRight = RIGHT - pill_w(c, badge) - 8;
-    snprintf(tail, sizeof(tail), "%s", r.b->destShort);
-  } else {
-    snprintf(tail, sizeof(tail), "%s %s", r.b->destShort, ar);
-  }
-  const int tailLeft = tailRight - text_w(c, f, tail);
-  if (tailLeft >= X_ARROW + ARROW_W + 4) {
-    draw_arrow(c, X_ARROW, y, INK);
-    draw_left(c, f, tailLeft, y, INK, tail);
-  }
-  // (Otherwise there's no room for the destination next to this pill — the
-  // pill matters more.)
+  else
+    draw_right(c, f, RIGHT, y, INK, ar);
 }
 
 static int page_count_for(int n, int hero) {
